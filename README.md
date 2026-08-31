@@ -1,13 +1,85 @@
-# ai-chatbot
+# WhatsApp AI-бот с админ-панелью
 
-AI-чат-бот для WhatsApp.
+Production-система: AI-консультант в WhatsApp (GREEN-API) с базой знаний
+(прямые FAQ + RAG на pgvector + OpenAI), чат-менеджером для операторов и
+полным контролем расходов. Код — white-label: одна инсталляция = одна
+компания, вся специфика организации живёт в настройках и базе знаний.
+Первая инсталляция — СУЦ «Меркурий Медет» (Алматы, mmedet.kz).
 
-## Стек (план)
+**Статус: ФАЗА 0 — проектирование. Кода ещё нет.**
 
-- WhatsApp: [Green API](https://green-api.com/)
-- AI-провайдер: TBD
-- Backend: TBD
+Источник истины по требованиям — [SPEC.md](SPEC.md). Правила работы для
+Claude Code — [CLAUDE.md](CLAUDE.md).
 
-## Статус
+## Документация
 
-Репозиторий создан, детали архитектуры и стека будут определены на следующих шагах.
+| Документ | Содержание |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | компоненты, pipeline, provider-adapter, языковая политика, решения владельца |
+| [docs/data-model.md](docs/data-model.md) | все таблицы, индексы и их обоснования, ENUM'ы, retention |
+| [docs/security-and-cost-controls.md](docs/security-and-cost-controls.md) | модель угроз, формулы контроля расходов, аутентификация, логирование |
+| [docs/deployment.md](docs/deployment.md) | compose-проект, сети, шлюз, TLS, бэкапы, обновление/откат |
+| [docs/implementation-plan.md](docs/implementation-plan.md) | фазы 1–10 с Definition of Done |
+| [docs/knowledge-base-import.md](docs/knowledge-base-import.md) | что и как импортируется из экспорта Savvi |
+| [docs/ui-reference/savvy-screenshots.md](docs/ui-reference/savvy-screenshots.md) | UI-референс (структура навигации Savvi) |
+
+## Стек
+
+Python 3.12+ · FastAPI · SQLAlchemy 2 (async) + Alembic · PostgreSQL 16 +
+pgvector · Redis 7 · официальный async OpenAI SDK · React + TypeScript +
+Vite + TanStack Query · Docker Compose · pytest.
+
+## Ключевые свойства
+
+- **Расходы под контролем:** атомарный резерв бюджета в PostgreSQL
+  (день/месяц/диалог/клиент), учёт по фактическому usage, прайс-таблица и
+  курсы валют с историей, алерты в WhatsApp на порогах 50/80/90/100%.
+- **Дёшево по построению:** прямые FAQ (0 токенов), semantic cache,
+  prompt caching (стабильный префикс), debounce, короткие ответы; в модель
+  никогда не уходит вся история переписки или вся база знаний.
+- **Безопасность:** одна учётка (телефон + пароль + TOTP), deny by default,
+  guardrails до вызова модели, ни одного порта наружу, секреты только в env.
+- **Операторский чат-менеджер:** режимы AUTO_AI / HUMAN / PAUSED / DISABLED,
+  вмешательство человека с телефона или из панели глушит AI, флаг «требует
+  внимания» вместо отдельной CRM-сущности.
+- **Три языка:** ru/kk/en; русский — источник истины, машинные черновики
+  переводов никогда не отдаются клиенту без утверждения.
+
+## Быстрый старт (появится в ФАЗЕ 1)
+
+```
+cp .env.example .env   # заполнить секреты, chmod 600
+make up                # поднять compose
+make migrate           # миграции
+make create-admin      # единственная учётная запись
+make test              # тесты
+```
+
+`DRY_RUN=true` (дефолт): система принимает и обрабатывает сообщения, но не
+отправляет ответы в WhatsApp — обязательный режим приёмки.
+
+## ⚠️ Обязательно: независимый лимит расходов OpenAI
+
+Внутренние лимиты приложения — первый уровень защиты. Второй, независимый:
+
+1. Создайте **отдельный OpenAI Project** только для этого бота
+   (platform.openai.com → Settings → Projects).
+2. Выпустите API-ключ именно в этом проекте — его и кладите в `.env`.
+3. Установите в проекте **hard spend limit** ≈ 4 000 ₸/мес в эквиваленте USD
+   (при курсе ~520 ₸/$ это ~7–8 $). Внутренний лимит приложения ниже —
+   3 000 ₸/мес.
+
+Баг в приложении не сможет пробить лимит OpenAI; лимит OpenAI не заменяет
+внутренний учёт. Не используйте этот ключ ни в каких других проектах.
+
+## Переменные окружения
+
+Полный список — `.env.example` (появится в ФАЗЕ 1). Основные группы:
+секреты (OPENAI_API_KEY, GREEN_API_ID_INSTANCE, GREEN_API_TOKEN,
+SESSION_SECRET, ENCRYPTION_KEY), модели (OPENAI_CHAT_MODEL,
+OPENAI_TRANSCRIBE_MODEL, OPENAI_EMBEDDING_MODEL, OPENAI_REASONING_EFFORT),
+лимиты (SPEC §9.3), режимы (DRY_RUN, COMPOSE_PROJECT_NAME).
+
+## Лицензия
+
+Проприетарный код. Все права принадлежат владельцу репозитория.
