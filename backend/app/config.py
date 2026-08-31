@@ -17,6 +17,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Blocklist, not a bind address: origins containing these are rejected in prod.
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0")  # noqa: S104  # nosec B104
 
+# GREEN-API limit for the receiveNotification long-poll parameter.
+_RECEIVE_TIMEOUT_MAX_SECONDS = 60
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -44,6 +47,19 @@ class Settings(BaseSettings):
     login_max_attempts_ip_15m: int = 30
     lockout_threshold: int = 5
     lockout_base_minutes: int = 15
+
+    # --- GREEN-API transport (phase 2) ---
+    green_api_base_url: str = "https://api.green-api.com"
+    green_api_media_url: str = "https://media.green-api.com"
+    # Empty id = transport not configured; the poller idles and says so.
+    green_api_id_instance: str = ""
+    green_api_token: str = ""  # secret, referenced from DB as token_ref
+    green_api_receive_timeout: int = 20  # long-poll seconds, 1..60
+    green_api_request_timeout: float = 15.0  # + receive_timeout for polling
+
+    retry_max_attempts: int = 3
+    outbox_flush_interval_seconds: float = 1.0
+    outbox_retry_base_seconds: float = 2.0
 
     dry_run: bool = True
     log_level: str = "INFO"
@@ -77,6 +93,19 @@ class Settings(BaseSettings):
             msg = "ENCRYPTION_KEY must be a valid Fernet key (generate_fernet_key)"
             raise ValueError(msg) from exc
         return v
+
+    @model_validator(mode="after")
+    def _validate_green_api_pair(self) -> Settings:
+        if bool(self.green_api_id_instance) != bool(self.green_api_token):
+            msg = (
+                "GREEN_API_ID_INSTANCE and GREEN_API_TOKEN must be set together "
+                "(or both left empty to disable the transport)"
+            )
+            raise ValueError(msg)
+        if not 1 <= self.green_api_receive_timeout <= _RECEIVE_TIMEOUT_MAX_SECONDS:
+            msg = "GREEN_API_RECEIVE_TIMEOUT must be within 1..60 seconds"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _validate_cors_for_env(self) -> Settings:

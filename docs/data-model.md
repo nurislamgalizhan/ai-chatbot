@@ -118,6 +118,43 @@ raw_payload jsonb, received_at, processed_at, status
 Групповые уведомления получают `status=ignored` без создания чата
 [РЕШЕНИЕ: бот в группах не читает и не пишет].
 
+## 6a. `wa_outbox` **[РАСШИРЕНИЕ]**
+
+Транспортный outbox: каждая исходящая отправка в WhatsApp проходит через
+него. Доменная таблица `messages` (фаза 3) ссылается на тот же
+`outbound_message_id` — транспорт остаётся независимым от домена чатов.
+
+| Поле | Тип | Примечание |
+|---|---|---|
+| id | bigint PK | |
+| instance_id | FK → whatsapp_instances | |
+| outbound_message_id | uuid NOT NULL | наш идемпотентный ключ |
+| wa_chat_id | text NOT NULL | |
+| kind | text | `text`/`file` |
+| body | text NULL | текст или подпись файла |
+| file_ref | text NULL | путь в media-томе для kind=file |
+| state | text | `PENDING` → `SENT` / `SKIPPED_DRY_RUN` / `FAILED_RETRYABLE` → `FAILED_FINAL` |
+| retry_count / next_attempt_at | | backoff+jitter, максимум `RETRY_MAX_ATTEMPTS` |
+| provider_message_id | text NULL | idMessage от провайдера после отправки |
+| error_code / error_detail | text NULL | |
+| correlation_id | text NULL | |
+| created_at / sent_at | timestamptz | |
+
+Индексы:
+- `UNIQUE (outbound_message_id)` — идемпотентность отправки: повторный
+  enqueue или ретрай flush не может отправить сообщение дважды.
+- частичный `(next_attempt_at) WHERE state IN ('PENDING','FAILED_RETRYABLE')`
+  — рабочая выборка флашера без сканирования отправленного архива.
+
+В `DRY_RUN=true` строки финализируются как `SKIPPED_DRY_RUN` — обработано и
+залогировано, наружу не ушло (режим приёмки, SPEC §17).
+
+Дедупликация статусов доставки: несколько статусов одного сообщения
+(sent → delivered → read) имеют один idMessage, поэтому в
+`inbound_notifications.provider_message_id` для статусов кладётся составной
+ключ `{idMessage}:status:{status}` — инвариант «одно входящее сообщение =
+максимум один вызов AI» сохраняется, а статусы не теряются.
+
 ## 7. `chats`
 
 | Поле | Тип | Примечание |

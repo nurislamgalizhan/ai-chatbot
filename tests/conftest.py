@@ -43,6 +43,10 @@ APP_TABLES = (
     "admin_sessions",
     "admin_totp_recovery_codes",
     "admin_user",
+    "system_events",
+    "wa_outbox",
+    "inbound_notifications",
+    "whatsapp_instances",
 )
 
 
