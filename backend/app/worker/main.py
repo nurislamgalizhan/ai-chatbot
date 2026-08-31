@@ -17,6 +17,7 @@ from redis.asyncio import Redis
 from app.config import get_settings
 from app.db.engine import build_engine, build_sessionmaker
 from app.observability.logging import configure_logging
+from app.services.inbox_processing import process_inbound_batch, reconcile_outbox
 from app.whatsapp.green_api import GreenApiProvider
 from app.whatsapp.outbox import OutboxFlusher
 from app.whatsapp.provider import ProviderError
@@ -36,6 +37,7 @@ HEARTBEAT_TTL_SECONDS = 90
 _POLL_ERROR_BACKOFF_START = 5.0
 _POLL_ERROR_BACKOFF_CAP = 60.0
 _IDLE_WITHOUT_INSTANCE_SECONDS = 60.0
+_DOMAIN_SYNC_IDLE_SECONDS = 1.0
 
 
 async def _heartbeat_loop(redis: Redis, stop: asyncio.Event) -> None:
@@ -92,6 +94,24 @@ async def _outbox_loop(
             await _wait(stop, settings.outbox_flush_interval_seconds)
 
 
+async def _domain_sync_loop(
+    sessionmaker: async_sessionmaker[AsyncSession], stop: asyncio.Event
+) -> None:
+    """Inbox -> chats/messages, plus outbox -> message state reconciliation."""
+    while not stop.is_set():
+        handled = 0
+        try:
+            async with sessionmaker() as db:
+                handled += await process_inbound_batch(db)
+                handled += await reconcile_outbox(db)
+                await db.commit()
+        except Exception:
+            logger.exception("domain_sync_error")
+            handled = 0
+        if handled == 0:
+            await _wait(stop, _DOMAIN_SYNC_IDLE_SECONDS)
+
+
 async def _wait(stop: asyncio.Event, seconds: float) -> None:
     try:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
@@ -130,6 +150,7 @@ async def run() -> None:
             group.create_task(_heartbeat_loop(redis, stop))
             group.create_task(_polling_loop(settings, sessionmaker, provider, instance_pk, stop))
             group.create_task(_outbox_loop(settings, sessionmaker, provider, stop))
+            group.create_task(_domain_sync_loop(sessionmaker, stop))
     finally:
         if provider is not None:
             await provider.aclose()

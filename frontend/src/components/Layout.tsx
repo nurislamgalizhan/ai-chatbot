@@ -19,6 +19,12 @@ export default function Layout() {
       <nav className="sidebar">
         <div className="brand">Админ-панель</div>
         <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>
+          Чаты
+        </NavLink>
+        <NavLink
+          to="/account"
+          className={({ isActive }) => (isActive ? "active" : "")}
+        >
           Учётная запись
         </NavLink>
         <div className="spacer" />

@@ -1,0 +1,420 @@
+"""Chat manager API. Rendering history NEVER calls OpenAI (SPEC invariant 16)."""
+
+from __future__ import annotations
+
+import base64
+import binascii
+from datetime import datetime
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import AdminUser, Chat, ChatTag, InternalNote, Message, Tag
+from app.models.enums import AttentionClearedReason, AttentionReason
+from app.schemas.chats import (
+    AttachTagRequest,
+    AttentionRequest,
+    ChatDetailResponse,
+    ChatListItem,
+    ChatListResponse,
+    MessageListResponse,
+    MessageResponse,
+    NoteCreateRequest,
+    NoteListResponse,
+    NoteResponse,
+    ResolveRequest,
+    SendMessageRequest,
+    SendMessageResponse,
+    TagResponse,
+)
+from app.security.audit import record_audit
+from app.security.deps import client_ip, get_db, require_admin
+from app.services.chats import clear_attention, send_panel_message, set_attention
+
+router = APIRouter(prefix="/api/chats", tags=["chats"], dependencies=[Depends(require_admin)])
+
+_PAGE_SIZE = 20
+_MESSAGES_PAGE_SIZE = 50
+
+NOT_FOUND = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Чат не найден")
+
+
+def _encode_cursor(ts: datetime, row_id: int) -> str:
+    raw = f"{ts.isoformat()}|{row_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode()
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, int]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+        ts_str, id_str = raw.split("|", 1)
+        return datetime.fromisoformat(ts_str), int(id_str)
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Неверный курсор"
+        ) from exc
+
+
+async def _get_chat(db: AsyncSession, chat_id: int) -> Chat:
+    chat = await db.get(Chat, chat_id)
+    if chat is None:
+        raise NOT_FOUND
+    return chat
+
+
+async def _tags_by_chat(db: AsyncSession, chat_ids: list[int]) -> dict[int, list[TagResponse]]:
+    if not chat_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(ChatTag.chat_id, Tag)
+            .join(Tag, Tag.id == ChatTag.tag_id)
+            .where(ChatTag.chat_id.in_(chat_ids))
+            .order_by(Tag.name)
+        )
+    ).all()
+    result: dict[int, list[TagResponse]] = {}
+    for chat_id, tag in rows:
+        result.setdefault(chat_id, []).append(
+            TagResponse(id=tag.id, name=tag.name, color=tag.color)
+        )
+    return result
+
+
+@router.get("", response_model=ChatListResponse)
+async def list_chats(  # noqa: PLR0912 - filter assembly
+    db: Annotated[AsyncSession, Depends(get_db)],
+    cursor: str | None = None,
+    q: Annotated[str | None, Query(max_length=100)] = None,
+    needs_attention: bool | None = None,
+    is_resolved: bool | None = None,
+    unread_only: bool = False,
+    tag_id: int | None = None,
+    mode: str | None = None,
+) -> ChatListResponse:
+    last_message = (
+        select(func.left(func.coalesce(Message.body, Message.transcript, ""), 120))
+        .where(Message.chat_id == Chat.id)
+        .order_by(Message.id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    stmt = select(Chat, last_message.label("preview"))
+
+    if q:
+        pattern = f"%{q}%"
+        text_match = (
+            select(Message.id)
+            .where(Message.chat_id == Chat.id, Message.body.ilike(pattern))
+            .limit(1)
+            .exists()
+        )
+        stmt = stmt.where(
+            or_(Chat.phone.ilike(pattern), Chat.display_name.ilike(pattern), text_match)
+        )
+    if needs_attention is not None:
+        stmt = stmt.where(Chat.needs_attention == needs_attention)
+    if is_resolved is not None:
+        stmt = stmt.where(Chat.is_resolved == is_resolved)
+    if unread_only:
+        stmt = stmt.where(Chat.unread_count > 0)
+    if tag_id is not None:
+        stmt = stmt.where(
+            select(ChatTag.tag_id)
+            .where(ChatTag.chat_id == Chat.id, ChatTag.tag_id == tag_id)
+            .exists()
+        )
+    if mode is not None:
+        stmt = stmt.where(Chat.mode == mode)
+    if cursor:
+        ts, row_id = _decode_cursor(cursor)
+        stmt = stmt.where(func.row(Chat.last_message_at, Chat.id) < func.row(ts, row_id))
+
+    stmt = stmt.order_by(Chat.last_message_at.desc(), Chat.id.desc()).limit(_PAGE_SIZE + 1)
+    rows = (await db.execute(stmt)).all()
+
+    has_more = len(rows) > _PAGE_SIZE
+    rows = rows[:_PAGE_SIZE]
+    tags_map = await _tags_by_chat(db, [chat.id for chat, _ in rows])
+    items = [
+        ChatListItem(
+            id=chat.id,
+            phone=chat.phone,
+            display_name=chat.display_name,
+            mode=chat.mode.value,
+            paused_until=chat.paused_until,
+            is_resolved=chat.is_resolved,
+            unread_count=chat.unread_count,
+            needs_attention=chat.needs_attention,
+            attention_reason=chat.attention_reason.value if chat.attention_reason else None,
+            last_message_at=chat.last_message_at,
+            last_actor=chat.last_actor.value if chat.last_actor else None,
+            last_message_preview=preview or None,
+            total_cost_usd=float(chat.total_cost_usd),
+            tags=tags_map.get(chat.id, []),
+        )
+        for chat, preview in rows
+    ]
+    next_cursor = None
+    if has_more and rows:
+        last_chat = rows[-1][0]
+        next_cursor = _encode_cursor(last_chat.last_message_at, last_chat.id)
+    return ChatListResponse(items=items, next_cursor=next_cursor)
+
+
+@router.get("/{chat_id}", response_model=ChatDetailResponse)
+async def open_chat(
+    chat_id: int,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ChatDetailResponse:
+    """Opening a dialog marks it read and clears "needs attention"
+    (owner decision) — the clearing is audited."""
+    chat = await _get_chat(db, chat_id)
+    chat.unread_count = 0
+    await clear_attention(
+        db,
+        chat,
+        AttentionClearedReason.PANEL_OPENED,
+        actor_user_id=user.id,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+    tags_map = await _tags_by_chat(db, [chat.id])
+    return ChatDetailResponse(
+        id=chat.id,
+        phone=chat.phone,
+        display_name=chat.display_name,
+        wa_chat_id=chat.wa_chat_id,
+        mode=chat.mode.value,
+        paused_until=chat.paused_until,
+        is_resolved=chat.is_resolved,
+        needs_attention=chat.needs_attention,
+        attention_reason=chat.attention_reason.value if chat.attention_reason else None,
+        last_message_at=chat.last_message_at,
+        total_cost_usd=float(chat.total_cost_usd),
+        created_at=chat.created_at,
+        tags=tags_map.get(chat.id, []),
+    )
+
+
+@router.get("/{chat_id}/messages", response_model=MessageListResponse)
+async def list_messages(
+    chat_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    before_id: int | None = None,
+) -> MessageListResponse:
+    await _get_chat(db, chat_id)
+    stmt = select(Message).where(Message.chat_id == chat_id)
+    if before_id is not None:
+        stmt = stmt.where(Message.id < before_id)
+    stmt = stmt.order_by(Message.id.desc()).limit(_MESSAGES_PAGE_SIZE + 1)
+    rows = list((await db.execute(stmt)).scalars().all())
+    has_more = len(rows) > _MESSAGES_PAGE_SIZE
+    rows = rows[:_MESSAGES_PAGE_SIZE]
+    items = [
+        MessageResponse(
+            id=m.id,
+            direction=m.direction.value,
+            source=m.source.value,
+            body=m.body,
+            media_type=m.media_type.value if m.media_type else None,
+            transcript=m.transcript,
+            state=m.state.value,
+            delivery_status=m.delivery_status,
+            error_code=m.error_code,
+            created_at=m.created_at,
+            sent_at=m.sent_at,
+        )
+        for m in rows
+    ]
+    next_cursor = str(rows[-1].id) if has_more and rows else None
+    return MessageListResponse(items=items, next_cursor=next_cursor)
+
+
+@router.post("/{chat_id}/messages", response_model=SendMessageResponse)
+async def send_message(
+    chat_id: int,
+    body: SendMessageRequest,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SendMessageResponse:
+    chat = await _get_chat(db, chat_id)
+    message_id, created = await send_panel_message(
+        db,
+        chat,
+        body.body,
+        body.client_message_id,
+        actor_user_id=user.id,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+    return SendMessageResponse(message_id=message_id, created=created)
+
+
+@router.post("/{chat_id}/resolve", response_model=ChatDetailResponse)
+async def resolve_chat(
+    chat_id: int,
+    body: ResolveRequest,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ChatDetailResponse:
+    chat = await _get_chat(db, chat_id)
+    if chat.is_resolved != body.is_resolved:
+        before = chat.is_resolved
+        chat.is_resolved = body.is_resolved
+        await record_audit(
+            db,
+            action="chat.resolved" if body.is_resolved else "chat.reopened",
+            actor_user_id=user.id,
+            entity_type="chat",
+            entity_id=str(chat.id),
+            before={"is_resolved": before},
+            after={"is_resolved": body.is_resolved},
+            ip=client_ip(request),
+            correlation_id=getattr(request.state, "correlation_id", None),
+        )
+    tags_map = await _tags_by_chat(db, [chat.id])
+    return ChatDetailResponse(
+        id=chat.id,
+        phone=chat.phone,
+        display_name=chat.display_name,
+        wa_chat_id=chat.wa_chat_id,
+        mode=chat.mode.value,
+        paused_until=chat.paused_until,
+        is_resolved=chat.is_resolved,
+        needs_attention=chat.needs_attention,
+        attention_reason=chat.attention_reason.value if chat.attention_reason else None,
+        last_message_at=chat.last_message_at,
+        total_cost_usd=float(chat.total_cost_usd),
+        created_at=chat.created_at,
+        tags=tags_map.get(chat.id, []),
+    )
+
+
+@router.post("/{chat_id}/attention", status_code=status.HTTP_204_NO_CONTENT)
+async def set_attention_flag(
+    chat_id: int,
+    body: AttentionRequest,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    chat = await _get_chat(db, chat_id)
+    correlation_id = getattr(request.state, "correlation_id", None)
+    if body.needs_attention:
+        await set_attention(db, chat, AttentionReason.MANUAL, correlation_id)
+    else:
+        await clear_attention(
+            db,
+            chat,
+            AttentionClearedReason.MANUAL,
+            actor_user_id=user.id,
+            correlation_id=correlation_id,
+        )
+
+
+@router.get("/{chat_id}/notes", response_model=NoteListResponse)
+async def list_notes(
+    chat_id: int, db: Annotated[AsyncSession, Depends(get_db)]
+) -> NoteListResponse:
+    await _get_chat(db, chat_id)
+    rows = (
+        (
+            await db.execute(
+                select(InternalNote)
+                .where(InternalNote.chat_id == chat_id)
+                .order_by(InternalNote.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return NoteListResponse(
+        items=[NoteResponse(id=n.id, body=n.body, created_at=n.created_at) for n in rows]
+    )
+
+
+@router.post("/{chat_id}/notes", response_model=NoteResponse)
+async def create_note(
+    chat_id: int,
+    body: NoteCreateRequest,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> NoteResponse:
+    await _get_chat(db, chat_id)
+    note = InternalNote(chat_id=chat_id, user_id=user.id, body=body.body)
+    db.add(note)
+    await db.flush()
+    await record_audit(
+        db,
+        action="chat.note_added",
+        actor_user_id=user.id,
+        entity_type="internal_note",
+        entity_id=str(note.id),
+        after={"chat_id": chat_id},
+        ip=client_ip(request),
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+    return NoteResponse(id=note.id, body=note.body, created_at=note.created_at)
+
+
+@router.post("/{chat_id}/tags", status_code=status.HTTP_204_NO_CONTENT)
+async def attach_tag(
+    chat_id: int,
+    body: AttachTagRequest,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    await _get_chat(db, chat_id)
+    tag = await db.get(Tag, body.tag_id)
+    if tag is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Тег не найден")
+    await db.execute(
+        pg_insert(ChatTag).values(chat_id=chat_id, tag_id=body.tag_id).on_conflict_do_nothing()
+    )
+    await record_audit(
+        db,
+        action="chat.tag_attached",
+        actor_user_id=user.id,
+        entity_type="chat",
+        entity_id=str(chat_id),
+        after={"tag_id": body.tag_id},
+        ip=client_ip(request),
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+
+
+@router.delete("/{chat_id}/tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def detach_tag(
+    chat_id: int,
+    tag_id: int,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    await _get_chat(db, chat_id)
+    row = (
+        await db.execute(
+            select(ChatTag).where(ChatTag.chat_id == chat_id, ChatTag.tag_id == tag_id)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Тег не привязан к чату")
+    await db.delete(row)
+    await record_audit(
+        db,
+        action="chat.tag_detached",
+        actor_user_id=user.id,
+        entity_type="chat",
+        entity_id=str(chat_id),
+        after={"tag_id": tag_id},
+        ip=client_ip(request),
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )

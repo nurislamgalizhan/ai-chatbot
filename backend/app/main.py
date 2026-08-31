@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 from sqlalchemy import text
 
-from app.api import account, auth, system
+from app.api import account, auth, chats, system, tags
 from app.config import Settings, get_settings
 from app.db.engine import build_engine, build_sessionmaker
 from app.middleware import CsrfAndOriginMiddleware, SecurityHeadersMiddleware
@@ -82,4 +82,6 @@ def create_app(settings: Settings | None = None, *, redis: Redis | None = None) 
     app.include_router(system.router)
     app.include_router(auth.router)
     app.include_router(account.router)
+    app.include_router(chats.router)
+    app.include_router(tags.router)
     return app
