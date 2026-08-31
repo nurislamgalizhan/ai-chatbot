@@ -1,0 +1,16 @@
+# Development overrides: loopback-only debug ports, dev env, relaxed cookies.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:55432:5432"
+
+  backend:
+    environment:
+      APP_ENV: dev
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  frontend:
+    ports:
+      - "127.0.0.1:8083:8080"

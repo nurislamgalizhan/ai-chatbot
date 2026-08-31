@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+*.pem
+node_modules
+dist
+__pycache__
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests
+docs
+seed

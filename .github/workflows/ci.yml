@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install
+        run: pip install -e "backend[dev]"
+      - name: Ruff
+        working-directory: backend
+        run: |
+          ruff check app
+          ruff format --check app
+      - name: Mypy
+        working-directory: backend
+        run: mypy app
+      - name: Bandit
+        working-directory: backend
+        run: bandit -q -r app -c pyproject.toml
+      - name: pip-audit
+        run: pip-audit --skip-editable
+      - name: Tests (against real PostgreSQL via testcontainers)
+        run: pytest tests -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: npm audit (production deps)
+        run: npm audit --omit=dev --audit-level=high
+      - name: No secrets or PII in the bundle
+        run: |
+          ! grep -rEi "(api[_-]?key|secret|password_hash|BEGIN [A-Z]+ PRIVATE KEY)" dist/assets/ || (echo "suspicious string in bundle" && exit 1)
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true

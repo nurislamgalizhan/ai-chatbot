@@ -1,0 +1,166 @@
+# Production compose. No service publishes a port: the admin panel is
+# reached only through the host's existing gateway attached to `edge`.
+name: ${COMPOSE_PROJECT_NAME:-wabot}
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-prod}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  REDIS_URL: redis://redis:6379/0
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+  CORS_ORIGINS: ${CORS_ORIGINS}
+  DRY_RUN: ${DRY_RUN:-true}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - max_connections=30
+      - -c
+      - work_mem=8MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [internal]
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
+    security_opt: [no-new-privileges=true]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    <<: *logging
+
+  redis:
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    # Coordination only (locks, debounce, rate limits): losing a key is
+    # worse than refusing a write, hence noeviction and no persistence.
+    command:
+      [
+        "redis-server",
+        "--maxmemory",
+        "64mb",
+        "--maxmemory-policy",
+        "noeviction",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+      ]
+    user: redis
+    networks: [internal]
+    restart: unless-stopped
+    mem_limit: 96m
+    cpus: 0.2
+    security_opt: [no-new-privileges=true]
+    cap_drop: [ALL]
+    read_only: true
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    <<: *logging
+
+  backend:
+    build: ./backend
+    environment: *app-env
+    networks: [internal]
+    restart: unless-stopped
+    mem_limit: 320m
+    cpus: 0.5
+    security_opt: [no-new-privileges=true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    <<: *logging
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker.main"]
+    environment: *app-env
+    networks: [internal]
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.75
+    security_opt: [no-new-privileges=true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker.health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    <<: *logging
+
+  frontend:
+    build: ./frontend
+    networks: [internal, edge]
+    restart: unless-stopped
+    mem_limit: 32m
+    cpus: 0.1
+    security_opt: [no-new-privileges=true]
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "--spider",
+          "http://127.0.0.1:8080/",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    <<: *logging
+
+networks:
+  internal:
+    internal: true
+  edge:
+
+volumes:
+  pgdata:

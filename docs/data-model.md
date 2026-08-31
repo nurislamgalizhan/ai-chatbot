@@ -54,6 +54,23 @@ SPEC §10 требует 8 одноразовых кодов восстанов�
 
 Индекс: `(user_id) WHERE used_at IS NULL` — выборка активных кодов при входе.
 
+## 2a. `login_challenges` **[РАСШИРЕНИЕ]**
+
+Промежуточное состояние «пароль принят, ждём TOTP». Сознательно НЕ сессия:
+обладание challenge-токеном не даёт доступа ни к одному API (покрыто тестом).
+
+| Поле | Тип |
+|---|---|
+| id | bigint PK |
+| user_id | FK → admin_user |
+| token_hash | text NOT NULL |
+| ip | text NULL |
+| expires_at | timestamptz NOT NULL (TTL ~5 мин) |
+| consumed_at | timestamptz NULL (одноразовость) |
+| created_at | timestamptz NOT NULL |
+
+Индекс: `UNIQUE (token_hash)` — поиск по хэшу токена, защита от коллизий.
+
 ## 3. `admin_sessions`
 
 id, user_id FK, session_token_hash (НЕ сам токен), user_agent, ip,

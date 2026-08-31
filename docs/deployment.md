@@ -40,7 +40,7 @@ DNS и сертификатов, выполняет владелец по это
 | redis | redis:7-alpine (digest-pinned) | 96 MiB | 0.2 | locks, debounce, rate limits |
 | backend | свой, multi-stage, non-root | 320 MiB | 0.5 | FastAPI (админ-API) |
 | worker | тот же образ, другая команда | 384 MiB | 0.75 | polling, pipeline, планировщики |
-| frontend | nginx:alpine + статика | 32 MiB | 0.1 | React-статика, прокси /api |
+| frontend | nginxinc/nginx-unprivileged:1.27-alpine + статика | 32 MiB | 0.1 | React-статика, прокси /api; non-root, слушает 8080 |
 
 Итого лимитов: ~1.34 GiB — в пределах разрешённых 1.2–1.5 GiB (SPEC §16),
 существующие контейнеры не выдавливаются (у хоста ~3 GiB свободно + swap).
