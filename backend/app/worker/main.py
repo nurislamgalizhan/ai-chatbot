@@ -66,7 +66,19 @@ async def _polling_loop(
         try:
             handled = await receiver.poll_once()
         except ProviderError as exc:
+            # Transport failure: nothing persisted, notification will be
+            # redelivered — back off and retry.
             logger.error("poll_error", error=str(exc))
+            await receiver.record_poll_error(exc)
+            await _wait(stop, error_backoff)
+            error_backoff = min(error_backoff * 2, _POLL_ERROR_BACKOFF_CAP)
+            continue
+        except Exception as exc:
+            # Infra (DB down) or a bug: the worker must stay alive — a
+            # crash loop kills heartbeat/outbox too. Poison payloads never
+            # reach this branch (they are absorbed as parse_failed inside
+            # poll_once), so whatever lands here is worth retrying.
+            logger.exception("poll_unexpected_error")
             await receiver.record_poll_error(exc)
             await _wait(stop, error_backoff)
             error_backoff = min(error_backoff * 2, _POLL_ERROR_BACKOFF_CAP)

@@ -50,7 +50,10 @@ class InboundNotification(Base):
     processed_at: Mapped[datetime | None]
     # stored: awaits processing by later pipeline phases;
     # ignored: terminal (groups, broadcasts, calls, instance events);
-    # processed / failed: set by the processing pipeline.
+    # processed / failed: set by the processing pipeline;
+    # parse_failed: the raw payload could not even be classified/stored
+    #   normally — preserved here as-is, ACKed at the provider so the
+    #   queue never wedges behind a poison notification.
     status: Mapped[str] = mapped_column(Text, server_default=text("'stored'"))
 
 

@@ -8,11 +8,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from app.models import AuditLog, Chat, Message, WaOutbox, WhatsappInstance
+from app.services.chats import upsert_chat_for_incoming
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.models import AuditLog, Chat, Message, WaOutbox, WhatsappInstance
-from app.services.chats import upsert_chat_for_incoming
 from tests.conftest import login
 
 
@@ -60,13 +60,18 @@ async def _make_chat(
         return chat.id
 
 
-async def test_pagination_neither_loses_nor_duplicates(authed, db_engine, instance_pk) -> None:
+async def test_pagination_neither_loses_nor_duplicates(
+    authed, db_engine, instance_pk
+) -> None:
     client, _ = authed
     base = datetime.now(UTC)
     expected_ids = []
     for i in range(45):
         chat_id = await _make_chat(
-            db_engine, instance_pk, f"{1000000 + i}", last_message_at=base - timedelta(minutes=i)
+            db_engine,
+            instance_pk,
+            f"{1000000 + i}",
+            last_message_at=base - timedelta(minutes=i),
         )
         expected_ids.append(chat_id)
 
@@ -111,7 +116,9 @@ async def test_open_chat_clears_attention_and_unread_with_audit(
     async with maker() as db:
         chat = await db.get(Chat, chat_id)
         audit = (
-            await db.execute(select(AuditLog).where(AuditLog.action == "chat.attention_cleared"))
+            await db.execute(
+                select(AuditLog).where(AuditLog.action == "chat.attention_cleared")
+            )
         ).scalar_one()
     assert chat.unread_count == 0
     assert chat.attention_cleared_reason == "panel_opened"
@@ -123,8 +130,12 @@ async def test_panel_send_is_idempotent(authed, db_engine, instance_pk) -> None:
     chat_id = await _make_chat(db_engine, instance_pk, "4000001")
     payload = {"body": "Добрый день!", "client_message_id": str(uuid.uuid4())}
 
-    first = await client.post(f"/api/chats/{chat_id}/messages", json=payload, headers=headers)
-    second = await client.post(f"/api/chats/{chat_id}/messages", json=payload, headers=headers)
+    first = await client.post(
+        f"/api/chats/{chat_id}/messages", json=payload, headers=headers
+    )
+    second = await client.post(
+        f"/api/chats/{chat_id}/messages", json=payload, headers=headers
+    )
     assert first.status_code == second.status_code == 200
     assert first.json()["created"] is True
     assert second.json()["created"] is False
@@ -153,7 +164,9 @@ async def test_message_list_pagination(authed, db_engine, instance_pk) -> None:
     assert len(page1["items"]) == 50
     assert page1["next_cursor"] is not None
     page2 = (
-        await client.get(f"/api/chats/{chat_id}/messages?before_id={page1['next_cursor']}")
+        await client.get(
+            f"/api/chats/{chat_id}/messages?before_id={page1['next_cursor']}"
+        )
     ).json()
     assert len(page2["items"]) == 10
     all_ids = [m["id"] for m in page1["items"] + page2["items"]]
@@ -170,13 +183,17 @@ async def test_resolve_and_notes_and_tags(authed, db_engine, instance_pk) -> Non
     assert resolved.json()["is_resolved"] is True
 
     note = await client.post(
-        f"/api/chats/{chat_id}/notes", json={"body": "перезвонить завтра"}, headers=headers
+        f"/api/chats/{chat_id}/notes",
+        json={"body": "перезвонить завтра"},
+        headers=headers,
     )
     assert note.status_code == 200
     notes = (await client.get(f"/api/chats/{chat_id}/notes")).json()["items"]
     assert [n["body"] for n in notes] == ["перезвонить завтра"]
 
-    tag = (await client.post("/api/tags", json={"name": "Аренда"}, headers=headers)).json()
+    tag = (
+        await client.post("/api/tags", json={"name": "Аренда"}, headers=headers)
+    ).json()
     dup = await client.post("/api/tags", json={"name": "аренда"}, headers=headers)
     assert dup.status_code == 409  # case-insensitive uniqueness
 
@@ -187,7 +204,9 @@ async def test_resolve_and_notes_and_tags(authed, db_engine, instance_pk) -> Non
     detail = (await client.get(f"/api/chats/{chat_id}")).json()
     assert [t["name"] for t in detail["tags"]] == ["Аренда"]
 
-    detach = await client.delete(f"/api/chats/{chat_id}/tags/{tag['id']}", headers=headers)
+    detach = await client.delete(
+        f"/api/chats/{chat_id}/tags/{tag['id']}", headers=headers
+    )
     assert detach.status_code == 204
 
 
@@ -204,7 +223,9 @@ async def test_missing_chat_is_404_not_500(authed) -> None:
     assert (await client.get("/api/chats/999999/messages")).status_code == 404
 
 
-async def test_unread_count_survives_concurrent_increments(db_engine, instance_pk) -> None:
+async def test_unread_count_survives_concurrent_increments(
+    db_engine, instance_pk
+) -> None:
     """The unread increment is a single atomic UPSERT: N concurrent
     inbound messages -> unread_count == N, and exactly one chat row."""
     maker = async_sessionmaker(db_engine, expire_on_commit=False)

@@ -98,7 +98,14 @@ class OutboxFlusher:
                 .all()
             )
             for row in rows:
-                await self._attempt(db, row)
+                try:
+                    await self._attempt(db, row)
+                except Exception as exc:  # noqa: BLE001 - one poison row must
+                    # not roll back the batch: earlier rows may already be
+                    # SENT at the provider, and a rollback would re-send
+                    # them (a real duplicate to the customer). Terminal.
+                    logger.exception("outbox_unexpected_error", outbox_id=row.id)
+                    self._fail(db, row, f"unexpected:{type(exc).__name__}", retryable=False)
                 handled += 1
             await db.commit()
         return handled

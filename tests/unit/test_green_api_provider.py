@@ -9,13 +9,12 @@ from typing import Any
 
 import httpx
 import pytest
-from cryptography.fernet import Fernet
-
 from app.config import Settings
 from app.whatsapp.green_api import GreenApiProvider
 from app.whatsapp.provider import ProviderError
+from cryptography.fernet import Fernet
 
-TOKEN = "supersecrettoken123"  # noqa: S105 - test fixture value
+TOKEN = "supersecrettoken123"
 
 
 def make_settings() -> Settings:
@@ -33,7 +32,9 @@ def make_settings() -> Settings:
 
 def make_provider(handler: Any) -> GreenApiProvider:
     transport = httpx.MockTransport(handler)
-    client = httpx.AsyncClient(transport=transport, base_url="https://api.green-api.example")
+    client = httpx.AsyncClient(
+        transport=transport, base_url="https://api.green-api.example"
+    )
     return GreenApiProvider(make_settings(), client=client)
 
 
@@ -124,7 +125,9 @@ async def test_delete_notification_uses_receipt_id() -> None:
     provider = make_provider(handler)
     await provider.delete_notification(42)
     assert seen["method"] == "DELETE"
-    assert seen["path"].endswith("/deleteNotification/42/" + TOKEN) or "42" in seen["path"]
+    assert (
+        seen["path"].endswith("/deleteNotification/42/" + TOKEN) or "42" in seen["path"]
+    )
 
 
 def test_provider_refuses_missing_configuration() -> None:

@@ -7,9 +7,6 @@ import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
 from app.models import (
     AuditLog,
     Chat,
@@ -21,6 +18,8 @@ from app.models import (
 from app.models.enums import AttentionReason, MsgSource, MsgState
 from app.services.chats import set_attention
 from app.services.inbox_processing import process_inbound_batch, reconcile_outbox
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 WA_CHAT = "77019481555@c.us"
 
@@ -56,7 +55,9 @@ async def instance_pk(db_engine) -> int:
         return row.id
 
 
-async def store(db_engine, instance_pk: int, payload: dict[str, Any], dedupe: str) -> None:
+async def store(
+    db_engine, instance_pk: int, payload: dict[str, Any], dedupe: str
+) -> None:
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
         db.add(
@@ -128,7 +129,9 @@ async def test_sticker_message_is_ignored_but_visible(db_engine, instance_pk) ->
     assert message.media_type.value == "sticker"
 
 
-async def test_operator_phone_reply_clears_attention_with_audit(db_engine, instance_pk) -> None:
+async def test_operator_phone_reply_clears_attention_with_audit(
+    db_engine, instance_pk
+) -> None:
     """Owner decision: a manager answering from their phone clears the flag."""
     await store(db_engine, instance_pk, incoming_payload("M1"), "M1")
     await run_processor(db_engine)
@@ -141,7 +144,9 @@ async def test_operator_phone_reply_clears_attention_with_audit(db_engine, insta
     await store(
         db_engine,
         instance_pk,
-        incoming_payload("OP1", text="Отвечаю лично", webhook="outgoingMessageReceived"),
+        incoming_payload(
+            "OP1", text="Отвечаю лично", webhook="outgoingMessageReceived"
+        ),
         "OP1",
     )
     await run_processor(db_engine)
@@ -149,10 +154,14 @@ async def test_operator_phone_reply_clears_attention_with_audit(db_engine, insta
     async with maker() as db:
         chat = (await db.execute(select(Chat))).scalar_one()
         reply = (
-            await db.execute(select(Message).where(Message.provider_message_id == "OP1"))
+            await db.execute(
+                select(Message).where(Message.provider_message_id == "OP1")
+            )
         ).scalar_one()
         audit = (
-            await db.execute(select(AuditLog).where(AuditLog.action == "chat.attention_cleared"))
+            await db.execute(
+                select(AuditLog).where(AuditLog.action == "chat.attention_cleared")
+            )
         ).scalar_one()
 
     assert chat.needs_attention is False
@@ -197,7 +206,9 @@ async def test_api_echo_links_to_outbox_message(db_engine, instance_pk) -> None:
     await store(
         db_engine,
         instance_pk,
-        incoming_payload("ECHO1", text="Ответ из панели", webhook="outgoingAPIMessageReceived"),
+        incoming_payload(
+            "ECHO1", text="Ответ из панели", webhook="outgoingAPIMessageReceived"
+        ),
         "ECHO1",
     )
     await run_processor(db_engine)
@@ -266,7 +277,8 @@ async def test_reconciler_propagates_outbox_states(db_engine, instance_pk) -> No
 
     async with maker() as db:
         by_id = {
-            m.outbound_message_id: m for m in (await db.execute(select(Message))).scalars().all()
+            m.outbound_message_id: m
+            for m in (await db.execute(select(Message))).scalars().all()
         }
     assert by_id[sent_id].state is MsgState.SENT
     assert by_id[sent_id].provider_message_id == "W1"

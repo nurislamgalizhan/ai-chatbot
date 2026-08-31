@@ -38,6 +38,11 @@ def phone_from_wa_chat_id(wa_chat_id: str) -> str:
     return f"+{digits}"
 
 
+def _dict(value: object) -> dict[str, Any]:
+    """Untrusted payload: any nested part may be of the wrong type."""
+    return value if isinstance(value, dict) else {}
+
+
 def _clip(value: object, limit: int) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -45,7 +50,7 @@ def _clip(value: object, limit: int) -> str | None:
 
 
 def parse_message(body: dict[str, Any]) -> ParsedMessage:
-    message_data = body.get("messageData") or {}
+    message_data = _dict(body.get("messageData"))
     type_message = str(message_data.get("typeMessage", ""))
 
     text: str | None = None
@@ -53,8 +58,8 @@ def parse_message(body: dict[str, Any]) -> ParsedMessage:
 
     if type_message in _TEXT_TYPES:
         text = _clip(
-            (message_data.get("textMessageData") or {}).get("textMessage")
-            or (message_data.get("extendedTextMessageData") or {}).get("text"),
+            _dict(message_data.get("textMessageData")).get("textMessage")
+            or _dict(message_data.get("extendedTextMessageData")).get("text"),
             _MAX_TEXT_LEN,
         )
     elif type_message in _MEDIA_BY_TYPE:

@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
 from app.main import StartupCheckError, create_app
 from app.services.admin_setup import (
     AdminSetupError,
     create_admin,
     reset_admin_password,
 )
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from tests.conftest import TEST_PASSWORD
 
 
-async def test_create_admin_refuses_second_account(admin_factory, db_engine, settings) -> None:
+async def test_create_admin_refuses_second_account(
+    admin_factory, db_engine, settings
+) -> None:
     await admin_factory()
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
@@ -23,7 +25,9 @@ async def test_create_admin_refuses_second_account(admin_factory, db_engine, set
             await create_admin(db, settings, "+77012223344", "Second", TEST_PASSWORD)
 
 
-async def test_create_admin_rejects_weak_password(db_engine, settings, clean_db) -> None:
+async def test_create_admin_rejects_weak_password(
+    db_engine, settings, clean_db
+) -> None:
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
         with pytest.raises(AdminSetupError, match="12"):
@@ -51,7 +55,9 @@ async def test_startup_fails_with_two_active_admins(
             pass
 
 
-async def test_reset_admin_password_revokes_sessions(admin_factory, db_engine, settings) -> None:
+async def test_reset_admin_password_revokes_sessions(
+    admin_factory, db_engine, settings
+) -> None:
     admin = await admin_factory()
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
@@ -59,7 +65,9 @@ async def test_reset_admin_password_revokes_sessions(admin_factory, db_engine, s
     assert phone == admin.phone
 
 
-async def test_reset_password_without_admin_fails(db_engine, settings, clean_db) -> None:
+async def test_reset_password_without_admin_fails(
+    db_engine, settings, clean_db
+) -> None:
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
         with pytest.raises(AdminSetupError, match="не создана"):

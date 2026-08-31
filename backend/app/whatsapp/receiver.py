@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.models import InboundNotification, SystemEvent, WhatsappInstance
 from app.whatsapp.classify import IGNORED_KINDS, classify
@@ -118,34 +119,99 @@ class PollingReceiver:
         self._last_polled_written = datetime.min.replace(tzinfo=UTC)
 
     async def poll_once(self) -> bool:
-        """Returns True if a notification was handled (queue may have more)."""
+        """Returns True if a notification was handled (queue may have more).
+
+        Ack discipline (owner decision, 2026-09-01):
+        - ProviderError / infra (DB) errors -> NO DeleteNotification: retry
+          after redelivery is justified, nothing was persisted.
+        - ANY parse/processing error -> the raw payload is preserved as a
+          parse_failed inbox row and the notification IS acked. A poison
+          notification must never wedge the queue: an un-acked one is
+          redelivered on EVERY following receiveNotification and blocks
+          all messages behind it — quieter than a crash loop, and worse.
+        """
         notification = await self._provider.poll_notification()
         await self._touch_last_polled()
         if notification is None:
             return False
 
-        async with self._sessionmaker() as db:
-            await store_notification(db, self._instance_pk, notification)
-            await db.commit()  # commit FIRST...
+        try:
+            async with self._sessionmaker() as db:
+                await store_notification(db, self._instance_pk, notification)
+                await db.commit()  # commit FIRST...
+        except (SQLAlchemyError, OSError):
+            # Infrastructure failure: nothing persisted, do NOT ack —
+            # redelivery is the correct outcome. The loop backs off.
+            raise
+        except Exception:
+            # Parse/classification failure: preserve the payload, mark the
+            # row parse_failed, and fall through to the ack below.
+            logger.exception("inbound_parse_failed", receipt_id=notification.receipt_id)
+            await self._record_parse_failure(notification)
         # ...only then acknowledge: a crash between commit and delete means
         # redelivery, which the UNIQUE constraint absorbs.
         await self._provider.delete_notification(notification.receipt_id)
         return True
 
-    async def record_poll_error(self, error: Exception) -> None:
-        async with self._sessionmaker() as db:
-            db.add(
-                SystemEvent(
-                    level="error",
-                    component="receiver",
-                    event="poll_failed",
-                    detail={"error": type(error).__name__, "message": str(error)[:300]},
+    async def _record_parse_failure(self, notification: RawNotification) -> None:
+        """Best-effort persistence of a poison notification (own session).
+
+        The raw payload lands in inbound_notifications.raw_payload (its
+        normal home, covered by the retention wipe) with status
+        parse_failed; system_events gets a PII-free pointer to it.
+        """
+        try:
+            async with self._sessionmaker() as db:
+                stmt = (
+                    pg_insert(InboundNotification)
+                    .values(
+                        instance_id=self._instance_pk,
+                        provider_message_id=f"receipt:{notification.receipt_id}:parse_failed",
+                        notification_type="parse_failed",
+                        raw_payload=notification.body,
+                        status="parse_failed",
+                        processed_at=datetime.now(UTC),
+                    )
+                    .on_conflict_do_nothing(constraint="uq_inbound_notifications_dedupe")
+                    .returning(InboundNotification.id)
                 )
-            )
-            instance = await db.get(WhatsappInstance, self._instance_pk)
-            if instance is not None:
-                instance.last_error = str(error)[:300]
-            await db.commit()
+                inbound_id = (await db.execute(stmt)).scalar_one_or_none()
+                db.add(
+                    SystemEvent(
+                        level="error",
+                        component="receiver",
+                        event="inbound_parse_failed",
+                        # PII-free: the payload itself lives in the inbox row.
+                        detail={
+                            "inbound_id": inbound_id,
+                            "receipt_id": notification.receipt_id,
+                        },
+                    )
+                )
+                await db.commit()
+        except Exception:
+            # Last resort: the ack still proceeds, but say so loudly.
+            logger.exception("parse_failure_record_failed", receipt_id=notification.receipt_id)
+
+    async def record_poll_error(self, error: Exception) -> None:
+        try:
+            async with self._sessionmaker() as db:
+                db.add(
+                    SystemEvent(
+                        level="error",
+                        component="receiver",
+                        event="poll_failed",
+                        detail={"error": type(error).__name__, "message": str(error)[:300]},
+                    )
+                )
+                instance = await db.get(WhatsappInstance, self._instance_pk)
+                if instance is not None:
+                    instance.last_error = str(error)[:300]
+                await db.commit()
+        except Exception:
+            # If the DB itself is down this would raise; the loop is already
+            # backing off — don't let bookkeeping kill the worker.
+            logger.exception("record_poll_error_failed")
 
     async def _touch_last_polled(self) -> None:
         now = datetime.now(UTC)

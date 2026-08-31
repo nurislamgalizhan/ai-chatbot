@@ -92,6 +92,7 @@ async def _handle_incoming(
 ) -> None:
     wa_chat_id = str((body.get("senderData") or {}).get("chatId", ""))
     parsed = parse_message(body)
+    provider_message_id = str(body.get("idMessage") or row.provider_message_id)
     chat_id = await upsert_chat_for_incoming(
         db,
         row.instance_id,
@@ -107,7 +108,7 @@ async def _handle_incoming(
         chat_id,
         source=MsgSource.CUSTOMER,
         state=state,
-        provider_message_id=str(body.get("idMessage")),
+        provider_message_id=provider_message_id,
         body=parsed.text,
         media_type=media,
         sent_at=_ts(parsed.timestamp),
@@ -129,7 +130,7 @@ async def _handle_operator_phone(
         chat_id,
         source=MsgSource.OPERATOR_PHONE,
         state=MsgState.SENT,
-        provider_message_id=str(body.get("idMessage")),
+        provider_message_id=str(body.get("idMessage") or row.provider_message_id),
         body=parsed.text,
         media_type=parsed.media_type,
         direction=MsgDirection.OUT,

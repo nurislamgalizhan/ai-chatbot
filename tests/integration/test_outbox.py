@@ -7,12 +7,11 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
 from app.models import SystemEvent, WaOutbox, WhatsappInstance
 from app.whatsapp.outbox import OutboxFlusher, enqueue_text
 from app.whatsapp.provider import ProviderError, SendResult, WhatsAppProvider
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 class ScriptedSender(WhatsAppProvider):
@@ -79,7 +78,9 @@ async def _get_row(db_engine, message_id: uuid.UUID) -> WaOutbox:
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db:
         return (
-            await db.execute(select(WaOutbox).where(WaOutbox.outbound_message_id == message_id))
+            await db.execute(
+                select(WaOutbox).where(WaOutbox.outbound_message_id == message_id)
+            )
         ).scalar_one()
 
 
@@ -87,7 +88,9 @@ async def _make_due_now(db_engine, message_id: uuid.UUID) -> None:
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
         await db.execute(
-            text("UPDATE wa_outbox SET next_attempt_at = now() WHERE outbound_message_id = :mid"),
+            text(
+                "UPDATE wa_outbox SET next_attempt_at = now() WHERE outbound_message_id = :mid"
+            ),
             {"mid": str(message_id)},
         )
 
@@ -119,7 +122,9 @@ async def test_dry_run_never_calls_provider(db_engine, instance_pk, settings) ->
     assert row.state == "SKIPPED_DRY_RUN"
 
 
-async def test_successful_send_records_provider_id(db_engine, instance_pk, settings) -> None:
+async def test_successful_send_records_provider_id(
+    db_engine, instance_pk, settings
+) -> None:
     message_id = uuid.uuid4()
     await _enqueue(db_engine, instance_pk, message_id)
     provider = ScriptedSender(["WAMID1"])
@@ -175,7 +180,9 @@ async def test_fatal_error_finalizes_immediately_with_system_event(
     assert row.state == "FAILED_FINAL"
     async with maker() as db:
         event = (
-            await db.execute(select(SystemEvent).where(SystemEvent.event == "send_failed_final"))
+            await db.execute(
+                select(SystemEvent).where(SystemEvent.event == "send_failed_final")
+            )
         ).scalar_one()
     assert event.level == "error"
 

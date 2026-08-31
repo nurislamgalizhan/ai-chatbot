@@ -335,12 +335,14 @@ export default function ChatsPage() {
 
             {showNotes && (
               <div className="notes-panel">
-                {(notesQuery.data?.items ?? []).map((n) => (
-                  <div key={n.id} className="note">
-                    <span className="muted">{timeShort(n.created_at)}</span>{" "}
-                    {n.body}
-                  </div>
-                ))}
+                <div className="notes-list">
+                  {(notesQuery.data?.items ?? []).map((n) => (
+                    <div key={n.id} className="note">
+                      <span className="muted">{timeShort(n.created_at)}</span>{" "}
+                      {n.body}
+                    </div>
+                  ))}
+                </div>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();

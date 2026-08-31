@@ -38,7 +38,8 @@ class RawNotification:
 
 @dataclass(frozen=True)
 class SendResult:
-    provider_message_id: str
+    # None = the provider accepted the send but did not return an id.
+    provider_message_id: str | None
 
 
 class WhatsAppProvider(ABC):

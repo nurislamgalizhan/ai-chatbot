@@ -42,15 +42,18 @@ class Classified:
     chat_id: str | None
 
 
+def _dict(value: object) -> dict[str, Any]:
+    """Untrusted payload: any nested part may be of the wrong type."""
+    return value if isinstance(value, dict) else {}
+
+
 def _chat_id(body: dict[str, Any]) -> str | None:
-    sender_data = body.get("senderData") or {}
-    chat_id = sender_data.get("chatId") or body.get("chatId")
+    chat_id = _dict(body.get("senderData")).get("chatId") or body.get("chatId")
     return str(chat_id) if chat_id else None
 
 
 def _message_type(body: dict[str, Any]) -> str | None:
-    message_data = body.get("messageData") or {}
-    type_message = message_data.get("typeMessage")
+    type_message = _dict(body.get("messageData")).get("typeMessage")
     return str(type_message) if type_message else None
 
 

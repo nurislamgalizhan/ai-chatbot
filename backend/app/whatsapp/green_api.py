@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import structlog
+from pydantic import ValidationError
 
 from app.whatsapp.provider import (
     ProviderError,
@@ -18,9 +20,16 @@ from app.whatsapp.provider import (
     SendResult,
     WhatsAppProvider,
 )
+from app.whatsapp.schemas import (
+    InstanceStateResponse,
+    NotificationEnvelope,
+    SendMessageResponse,
+)
 
 if TYPE_CHECKING:
     from app.config import Settings
+
+logger = structlog.get_logger(__name__)
 
 _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 _HTTP_ERROR_MIN = 400
@@ -89,7 +98,19 @@ class GreenApiProvider(WhatsAppProvider):
         )
         if payload is None:
             return None
-        return RawNotification(receipt_id=int(payload["receiptId"]), body=payload["body"])
+        try:
+            envelope = NotificationEnvelope.model_validate(payload)
+        except ValidationError as exc:
+            # No usable receiptId means the notification cannot be acked at
+            # all — a protocol-level provider failure; retry is the only
+            # option and the loop will back off. (The lenient body coercion
+            # in the schema makes this reachable only when receiptId itself
+            # is missing or non-numeric.)
+            logger.error("receive_envelope_invalid", errors=exc.error_count())
+            raise ProviderError(
+                "receiveNotification.envelope", status_code=None, retryable=True
+            ) from exc
+        return RawNotification(receipt_id=envelope.receipt_id, body=envelope.body)
 
     async def delete_notification(self, receipt_id: int) -> None:
         await self._request(
@@ -105,7 +126,7 @@ class GreenApiProvider(WhatsAppProvider):
             self._path("sendMessage"),
             json={"chatId": chat_id, "message": text},
         )
-        return SendResult(provider_message_id=str(payload["idMessage"]))
+        return self._send_result("sendMessage", payload)
 
     async def send_file(
         self, chat_id: str, file_path: str, file_name: str, caption: str | None = None
@@ -124,11 +145,27 @@ class GreenApiProvider(WhatsAppProvider):
             raise ProviderError("sendFileByUpload", status_code=None, retryable=True) from exc
         if response.status_code >= _HTTP_ERROR_MIN:
             raise _classify_status("sendFileByUpload", response.status_code)
-        return SendResult(provider_message_id=str(response.json()["idMessage"]))
+        return self._send_result("sendFileByUpload", response.json())
 
     async def get_instance_state(self) -> str:
         payload = await self._request("getStateInstance", "GET", self._path("getStateInstance"))
-        return str(payload["stateInstance"])
+        try:
+            return InstanceStateResponse.model_validate(payload or {}).state_instance
+        except ValidationError:
+            return "unknown"
+
+    @staticmethod
+    def _send_result(method: str, payload: object) -> SendResult:
+        """HTTP 2xx means the provider ACCEPTED the message. A missing
+        idMessage must not fail the send: failing would schedule a retry
+        and deliver the message to the customer twice."""
+        try:
+            parsed = SendMessageResponse.model_validate(payload or {})
+        except ValidationError:
+            parsed = SendMessageResponse()
+        if parsed.id_message is None:
+            logger.warning("send_response_without_id", method=method)
+        return SendResult(provider_message_id=parsed.id_message)
 
     async def aclose(self) -> None:
         await self._client.aclose()
