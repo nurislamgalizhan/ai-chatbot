@@ -10,6 +10,7 @@ import { ApiError } from "./api/client";
 import Layout from "./components/Layout";
 import AccountPage from "./pages/AccountPage";
 import ChatsPage from "./pages/ChatsPage";
+import KnowledgePage from "./pages/KnowledgePage";
 import LoginPage from "./pages/LoginPage";
 
 const queryClient = new QueryClient({
@@ -41,6 +42,7 @@ const router = createBrowserRouter([
         element: <Layout />,
         children: [
           { path: "/", element: <ChatsPage /> },
+          { path: "/knowledge", element: <KnowledgePage /> },
           { path: "/account", element: <AccountPage /> },
         ],
       },

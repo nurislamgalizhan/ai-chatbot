@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 from sqlalchemy import text
 
-from app.api import account, auth, chats, system, system_settings, tags
+from app.api import account, auth, chats, kb, system, system_settings, tags
 from app.config import Settings, get_settings
 from app.db.engine import build_engine, build_sessionmaker
 from app.middleware import CsrfAndOriginMiddleware, SecurityHeadersMiddleware
@@ -42,7 +42,21 @@ async def run_startup_checks(app: FastAPI) -> None:
     await app.state.redis.ping()
 
 
-def create_app(settings: Settings | None = None, *, redis: Redis | None = None) -> FastAPI:
+def _build_embedding_provider(settings: Settings) -> object | None:
+    if not settings.openai_api_key:
+        logger.warning("openai_not_configured", detail="kb search preview disabled")
+        return None
+    from app.ai.embeddings import OpenAIEmbeddingProvider  # noqa: PLC0415
+
+    return OpenAIEmbeddingProvider(settings)
+
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    redis: Redis | None = None,
+    embedding_provider: object | None = None,
+) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings)
 
@@ -52,6 +66,9 @@ def create_app(settings: Settings | None = None, *, redis: Redis | None = None) 
         app.state.engine = build_engine(settings)
         app.state.sessionmaker = build_sessionmaker(app.state.engine)
         app.state.redis = redis if redis is not None else Redis.from_url(settings.redis_url)
+        # The API only PREVIEWS retrieval (it embeds the query); indexing
+        # and all chat calls belong to the worker.
+        app.state.embedding_provider = embedding_provider or _build_embedding_provider(settings)
         await run_startup_checks(app)
         logger.info("app_started", env=settings.app_env, dry_run=settings.dry_run)
         try:
@@ -85,4 +102,5 @@ def create_app(settings: Settings | None = None, *, redis: Redis | None = None) 
     app.include_router(chats.router)
     app.include_router(tags.router)
     app.include_router(system_settings.router)
+    app.include_router(kb.router)
     return app

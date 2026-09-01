@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import getpass
 import sys
+from pathlib import Path
 
 from app.config import get_settings
 from app.db.engine import build_engine, build_sessionmaker
@@ -15,6 +16,7 @@ from app.services.admin_setup import (
     create_admin,
     reset_admin_password,
 )
+from app.services.kb_import import import_savvi_export
 from app.services.phone import PhoneValidationError
 
 
@@ -74,17 +76,43 @@ async def _cmd_reset_admin_password() -> int:
     return 0
 
 
+async def _cmd_kb_import(source: str) -> int:
+    settings = get_settings()
+    path = Path(source)
+    if not path.is_file():
+        print(f"Файл не найден: {path}", file=sys.stderr)
+        return 2
+    engine = build_engine(settings)
+    try:
+        async with build_sessionmaker(engine)() as db, db.begin():
+            report = await import_savvi_export(db, path)
+    finally:
+        await engine.dispose()
+    print(report.render())
+    print(
+        "\nВсе документы созданы как черновики и не индексируются. "
+        "Проверьте их в админке и включите нужные."
+    )
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="app.cli")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("create-admin", help="Create the single admin account")
     sub.add_parser("reset-admin-password", help="Reset the admin password")
+    kb_import = sub.add_parser(
+        "kb-import", help="Import the Savvi export into the knowledge base (drafts)"
+    )
+    kb_import.add_argument("--source", default="seed/savvi-export.md")
     args = parser.parse_args()
 
     if args.command == "create-admin":
         raise SystemExit(asyncio.run(_cmd_create_admin()))
     if args.command == "reset-admin-password":
         raise SystemExit(asyncio.run(_cmd_reset_admin_password()))
+    if args.command == "kb-import":
+        raise SystemExit(asyncio.run(_cmd_kb_import(args.source)))
 
 
 if __name__ == "__main__":

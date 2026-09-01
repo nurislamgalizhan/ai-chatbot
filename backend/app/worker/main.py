@@ -14,11 +14,13 @@ from typing import TYPE_CHECKING
 import structlog
 from redis.asyncio import Redis
 
+from app.ai.embeddings import EmbeddingError, EmbeddingProvider, OpenAIEmbeddingProvider
 from app.config import get_settings
 from app.db.engine import build_engine, build_sessionmaker
 from app.observability.logging import configure_logging
 from app.services.chat_modes import resume_expired_pauses
 from app.services.inbox_processing import process_inbound_batch, reconcile_outbox
+from app.services.kb_indexing import process_pending_documents
 from app.whatsapp.green_api import GreenApiProvider
 from app.whatsapp.outbox import OutboxFlusher
 from app.whatsapp.provider import ProviderError
@@ -40,6 +42,7 @@ _POLL_ERROR_BACKOFF_CAP = 60.0
 _IDLE_WITHOUT_INSTANCE_SECONDS = 60.0
 _DOMAIN_SYNC_IDLE_SECONDS = 1.0
 _MODE_SCHEDULER_INTERVAL_SECONDS = 5.0
+_KB_INDEXING_IDLE_SECONDS = 5.0
 
 
 async def _heartbeat_loop(redis: Redis, stop: asyncio.Event) -> None:
@@ -142,6 +145,31 @@ async def _mode_scheduler_loop(
         await _wait(stop, _MODE_SCHEDULER_INTERVAL_SECONDS)
 
 
+async def _kb_indexing_loop(
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    provider: EmbeddingProvider | None,
+    stop: asyncio.Event,
+) -> None:
+    """Embeds documents queued by the admin. Without an OpenAI key it
+    idles and says so instead of pretending to index."""
+    if provider is None:
+        logger.warning("openai_not_configured", detail="kb indexing disabled")
+        while not stop.is_set():
+            await _wait(stop, _IDLE_WITHOUT_INSTANCE_SECONDS)
+        return
+    while not stop.is_set():
+        handled = 0
+        try:
+            async with sessionmaker() as db:
+                handled = await process_pending_documents(db, provider, settings)
+                await db.commit()
+        except Exception:
+            logger.exception("kb_indexing_error")
+        if handled == 0:
+            await _wait(stop, _KB_INDEXING_IDLE_SECONDS)
+
+
 async def _wait(stop: asyncio.Event, seconds: float) -> None:
     try:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
@@ -161,6 +189,13 @@ async def run() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
+    embedding_provider: EmbeddingProvider | None = None
+    if settings.openai_api_key:
+        try:
+            embedding_provider = OpenAIEmbeddingProvider(settings)
+        except EmbeddingError:
+            logger.exception("embedding_provider_init_failed")
+
     provider: GreenApiProvider | None = None
     instance_pk: int | None = None
     if settings.green_api_id_instance:
@@ -174,6 +209,7 @@ async def run() -> None:
         env=settings.app_env,
         dry_run=settings.dry_run,
         transport_configured=provider is not None,
+        embeddings_configured=embedding_provider is not None,
     )
     try:
         async with asyncio.TaskGroup() as group:
@@ -182,9 +218,12 @@ async def run() -> None:
             group.create_task(_outbox_loop(settings, sessionmaker, provider, stop))
             group.create_task(_domain_sync_loop(sessionmaker, stop))
             group.create_task(_mode_scheduler_loop(sessionmaker, stop))
+            group.create_task(_kb_indexing_loop(settings, sessionmaker, embedding_provider, stop))
     finally:
         if provider is not None:
             await provider.aclose()
+        if embedding_provider is not None:
+            await embedding_provider.aclose()
         await redis.aclose()
         await engine.dispose()
         logger.info("worker_stopped")

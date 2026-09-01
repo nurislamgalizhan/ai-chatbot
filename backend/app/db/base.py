@@ -16,6 +16,11 @@ NAMING_CONVENTION = {
 
 
 class Base(DeclarativeBase):
+    # Fetch server defaults (created_at, updated_at, ...) via RETURNING on
+    # INSERT/UPDATE. Without this they stay unloaded after flush and any
+    # later attribute read raises MissingGreenlet in async code.
+    __mapper_args__ = {"eager_defaults": True}  # noqa: RUF012
+
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
     # All timestamps in the schema are timestamptz (UTC); rendering in the
     # organization's timezone is the UI's job.

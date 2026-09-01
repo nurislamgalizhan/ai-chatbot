@@ -6,6 +6,7 @@ import Icon from "./icons";
 
 const PAGE_TITLES: Record<string, string> = {
   "/": "Чаты",
+  "/knowledge": "База знаний",
   "/account": "Учётная запись",
 };
 
@@ -63,6 +64,12 @@ export default function Layout() {
         <div className="brand">Админ-панель</div>
         <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>
           <Icon name="chat" /> Чаты
+        </NavLink>
+        <NavLink
+          to="/knowledge"
+          className={({ isActive }) => (isActive ? "active" : "")}
+        >
+          <Icon name="book" /> База знаний
         </NavLink>
         <NavLink
           to="/account"

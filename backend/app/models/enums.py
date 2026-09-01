@@ -65,3 +65,29 @@ class AttentionClearedReason(StrEnum):
     OPERATOR_PHONE_REPLY = "operator_phone_reply"
     PANEL_OPENED = "panel_opened"
     MANUAL = "manual"
+
+
+class KbLanguage(StrEnum):
+    RU = "ru"
+    KK = "kk"
+    EN = "en"
+
+
+class AnswerStatus(StrEnum):
+    """A machine draft is never delivered to a customer (owner decision)."""
+
+    ABSENT = "absent"
+    MACHINE = "machine"
+    APPROVED = "approved"
+
+
+class DocStatus(StrEnum):
+    DRAFT = "draft"
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class SourceType(StrEnum):
+    MANUAL_TEXT = "manual_text"
+    FILE = "file"
+    FAQ = "faq"

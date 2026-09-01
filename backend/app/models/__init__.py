@@ -9,6 +9,14 @@ from app.models.chat import (
     Message,
     Tag,
 )
+from app.models.knowledge import (
+    KbChunk,
+    KbDocument,
+    KbFaq,
+    KbFaqMiss,
+    KbFaqPattern,
+    KbProcessingLog,
+)
 from app.models.settings import AppSetting
 from app.models.whatsapp import (
     InboundNotification,
@@ -28,6 +36,12 @@ __all__ = [
     "ChatTag",
     "InboundNotification",
     "InternalNote",
+    "KbChunk",
+    "KbDocument",
+    "KbFaq",
+    "KbFaqMiss",
+    "KbFaqPattern",
+    "KbProcessingLog",
     "LoginChallenge",
     "Message",
     "SystemEvent",

@@ -57,6 +57,20 @@ class Settings(BaseSettings):
     green_api_receive_timeout: int = 20  # long-poll seconds, 1..60
     green_api_request_timeout: float = 15.0  # + receive_timeout for polling
 
+    # --- OpenAI (phase 5 uses embeddings only; chat lands in phase 6) ---
+    openai_api_key: str = ""
+    openai_embedding_model: str = "text-embedding-3-small"
+    openai_chat_model: str = "gpt-5.6-luna"
+    openai_transcribe_model: str = "gpt-transcribe"
+    openai_reasoning_effort: str = "low"
+    openai_request_timeout: float = 60.0
+
+    # --- RAG (SPEC §9.3 defaults; editable in the admin later) ---
+    chunk_tokens: int = 450
+    chunk_overlap: int = 60
+    rag_top_k: int = 5
+    rag_min_score: float = 0.35
+
     retry_max_attempts: int = 3
     outbox_flush_interval_seconds: float = 1.0
     outbox_retry_base_seconds: float = 2.0
