@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { login, verifyTotp } from "../api/auth";
+import Icon from "../components/icons";
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -46,10 +47,17 @@ export default function LoginPage() {
   return (
     <div className="login-wrap">
       <div className="login-card">
-        <h1>Вход в админ-панель</h1>
+        <div className="logo-tile">
+          <Icon name="chat" size={22} />
+        </div>
+        <h1>Добро пожаловать</h1>
+        <p className="sub">
+          {step === "password"
+            ? "Войдите, чтобы использовать админ-панель"
+            : "Код из приложения-аутентификатора или код восстановления"}
+        </p>
         {step === "password" ? (
           <form onSubmit={submitPassword}>
-            <p className="sub">Номер телефона и пароль администратора</p>
             <label htmlFor="phone">Телефон</label>
             <input
               id="phone"
@@ -64,31 +72,30 @@ export default function LoginPage() {
               id="password"
               type="password"
               autoComplete="current-password"
+              placeholder="Введите пароль"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
             />
             <button className="primary" disabled={busy}>
-              {busy ? "Проверка…" : "Далее"}
+              {busy ? "Проверка…" : "Далее →"}
             </button>
           </form>
         ) : (
           <form onSubmit={submitTotp}>
-            <p className="sub">
-              Код из приложения-аутентификатора (или код восстановления)
-            </p>
             <label htmlFor="code">Код подтверждения</label>
             <input
               id="code"
               autoComplete="one-time-code"
               inputMode="numeric"
+              placeholder="000000"
               value={code}
               onChange={(e) => setCode(e.target.value)}
               required
               autoFocus
             />
             <button className="primary" disabled={busy}>
-              {busy ? "Проверка…" : "Войти"}
+              {busy ? "Проверка…" : "Войти →"}
             </button>
           </form>
         )}

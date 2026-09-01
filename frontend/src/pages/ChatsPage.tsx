@@ -21,6 +21,7 @@ import {
   resolveChat,
   sendMessage,
 } from "../api/chats";
+import Icon, { IconName } from "../components/icons";
 
 const SOURCE_LABEL: Record<string, string> = {
   customer: "Клиент",
@@ -30,12 +31,45 @@ const SOURCE_LABEL: Record<string, string> = {
   system: "Система",
 };
 
+const SOURCE_ICON: Record<string, IconName> = {
+  ai: "bot",
+  operator_panel: "monitor",
+  operator_phone: "phone",
+  system: "check",
+};
+
 const FILTERS: { key: ChatFilter; label: string }[] = [
   { key: "all", label: "Все" },
   { key: "attention", label: "Требуют внимания" },
   { key: "unread", label: "Непрочитанные" },
   { key: "unresolved", label: "Нерешённые" },
 ];
+
+const AVATAR_COLORS = 8;
+
+/** djb2 hash -> stable pastel pair per name (Savvi-style avatars). */
+function avatarIndex(seed: string): number {
+  let hash = 5381;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash * 33) ^ seed.charCodeAt(i);
+  }
+  return Math.abs(hash) % AVATAR_COLORS;
+}
+
+function Avatar({ seed, label }: { seed: string; label: string }) {
+  const idx = avatarIndex(seed);
+  return (
+    <span
+      className="avatar"
+      style={{
+        background: `var(--avatar-bg-${idx})`,
+        color: `var(--avatar-fg-${idx})`,
+      }}
+    >
+      {label.trim()[0]?.toUpperCase() ?? "?"}
+    </span>
+  );
+}
 
 function timeShort(value: string): string {
   const date = new Date(value);
@@ -45,28 +79,45 @@ function timeShort(value: string): string {
     : date.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBlock({
+  message,
+  peerName,
+}: {
+  message: ChatMessage;
+  peerName: string;
+}) {
   const isCustomer = message.direction === "in";
-  const classes = ["bubble", isCustomer ? "from-customer" : "from-us", `src-${message.source}`];
+  const classes = ["msg", isCustomer ? "from-customer" : "", `src-${message.source}`]
+    .filter(Boolean)
+    .join(" ");
   return (
-    <div className={`bubble-row ${isCustomer ? "left" : "right"}`}>
-      <div className={classes.join(" ")}>
-        <div className="bubble-meta">
-          <span>{SOURCE_LABEL[message.source] ?? message.source}</span>
-          <span>{timeShort(message.sent_at ?? message.created_at)}</span>
-        </div>
-        {message.media_type && (
-          <div className="media-hint">[{message.media_type}]</div>
+    <div className={classes}>
+      <div className="msg-head">
+        {isCustomer ? (
+          <Avatar seed={peerName} label={peerName} />
+        ) : (
+          <span className="src-icon">
+            <Icon name={SOURCE_ICON[message.source] ?? "check"} size={14} />
+          </span>
         )}
-        {message.body && <div>{message.body}</div>}
-        {message.transcript && <div className="muted">🎤 {message.transcript}</div>}
-        {message.delivery_status === "skipped_dry_run" && (
-          <div className="dry-run-hint">DRY RUN — не отправлено</div>
-        )}
-        {message.error_code && (
-          <div className="error">Ошибка: {message.error_code}</div>
-        )}
+        <span className="src-name">
+          {isCustomer ? peerName : (SOURCE_LABEL[message.source] ?? message.source)}
+        </span>
+        <span className="msg-time">
+          {timeShort(message.sent_at ?? message.created_at)}
+        </span>
       </div>
+      {message.media_type && <div className="media-hint">[{message.media_type}]</div>}
+      {message.body && <div>{message.body}</div>}
+      {message.transcript && <div className="muted">🎤 {message.transcript}</div>}
+      {message.delivery_status === "skipped_dry_run" && (
+        <div className="plaque warn">
+          <strong>DRY RUN:</strong> сообщение обработано, но не отправлено
+        </div>
+      )}
+      {message.error_code && (
+        <div className="plaque danger">Ошибка: {message.error_code}</div>
+      )}
     </div>
   );
 }
@@ -80,7 +131,6 @@ export default function ChatsPage() {
   const [showNotes, setShowNotes] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
   const [tagDraft, setTagDraft] = useState("");
-  const listRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const chatsQuery = useInfiniteQuery({
@@ -126,8 +176,7 @@ export default function ChatsPage() {
   });
 
   const send = useMutation({
-    mutationFn: (body: string) =>
-      sendMessage(selectedId!, body, crypto.randomUUID()),
+    mutationFn: (body: string) => sendMessage(selectedId!, body, crypto.randomUUID()),
     onSuccess: () => {
       setDraft("");
       void queryClient.invalidateQueries({ queryKey: ["messages", selectedId] });
@@ -205,60 +254,72 @@ export default function ChatsPage() {
   }
 
   const detail = chatDetail.data;
+  const peerName = detail?.display_name ?? detail?.phone ?? "";
 
   return (
     <div className="chats-layout">
       <aside className="chat-list-pane">
-        <input
-          placeholder="Поиск: номер, имя, текст…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+        <div className="search-row">
+          <span className="search-icon">
+            <Icon name="search" size={16} />
+          </span>
+          <input
+            placeholder="Поиск по диалогам…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
         <div className="filter-chips">
           {FILTERS.map((f) => (
             <button
               key={f.key}
-              className={filter === f.key ? "chip active" : "chip"}
+              className={filter === f.key ? "chip-btn active" : "chip-btn"}
               onClick={() => setFilter(f.key)}
             >
               {f.label}
             </button>
           ))}
         </div>
-        <div className="chat-list" ref={listRef}>
-          {chats.map((chat) => (
-            <button
-              key={chat.id}
-              className={`chat-item ${chat.id === selectedId ? "selected" : ""}`}
-              onClick={() => setSelectedId(chat.id)}
-            >
-              <div className="chat-item-top">
-                <span className="chat-name">
-                  {chat.display_name ?? chat.phone}
-                </span>
-                <span className="muted">{timeShort(chat.last_message_at)}</span>
-              </div>
-              <div className="chat-item-bottom">
-                <span className="preview muted">
-                  {chat.last_message_preview ?? "—"}
-                </span>
-                {chat.unread_count > 0 && (
-                  <span className="badge unread">{chat.unread_count}</span>
-                )}
-              </div>
-              <div className="chat-item-flags">
-                {chat.needs_attention && (
-                  <span className="badge attention">требует внимания</span>
-                )}
-                {chat.is_resolved && <span className="tag ok">решено</span>}
-                {chat.tags.map((t) => (
-                  <span key={t.id} className="tag">
-                    {t.name}
+        <div className="chat-list">
+          {chats.map((chat) => {
+            const name = chat.display_name ?? chat.phone;
+            return (
+              <button
+                key={chat.id}
+                className={`chat-item ${chat.id === selectedId ? "selected" : ""}`}
+                onClick={() => setSelectedId(chat.id)}
+              >
+                <Avatar seed={name} label={name} />
+                <span>
+                  <span className="chat-item-top">
+                    <span className="chat-name">{name}</span>
+                    <span className="chat-time">
+                      {timeShort(chat.last_message_at)}
+                    </span>
                   </span>
-                ))}
-              </div>
-            </button>
-          ))}
+                  <span className="chat-item-bottom">
+                    <span className="preview">
+                      {chat.last_message_preview ?? "—"}
+                    </span>
+                    {chat.unread_count > 0 && (
+                      <span className="badge unread">{chat.unread_count}</span>
+                    )}
+                  </span>
+                  <span className="chat-item-flags">
+                    {chat.needs_attention && (
+                      <span className="badge attention">требует внимания</span>
+                    )}
+                    {chat.is_resolved && <span className="tag ok">решено</span>}
+                    {chat.tags.map((t) => (
+                      <span key={t.id} className="tag">
+                        {t.name}
+                      </span>
+                    ))}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
           {chats.length === 0 && !chatsQuery.isPending && (
             <div className="muted empty">Чатов нет</div>
           )}
@@ -276,15 +337,18 @@ export default function ChatsPage() {
 
       <section className="chat-pane">
         {selectedId === null || !detail ? (
-          <div className="muted empty">Выберите чат слева (↑/↓ и Enter)</div>
+          <div className="muted empty" style={{ margin: "auto" }}>
+            Выберите чат слева (↑/↓ и Enter)
+          </div>
         ) : (
           <>
             <header className="chat-header">
-              <div>
-                <div className="chat-name">
-                  {detail.display_name ?? detail.phone}
+              <div className="peer">
+                <Avatar seed={peerName} label={peerName} />
+                <div className="who">
+                  <div className="name">{peerName}</div>
+                  <div className="sub">{detail.phone}</div>
                 </div>
-                <div className="muted">{detail.phone}</div>
               </div>
               <div className="chat-header-actions">
                 <span className="muted">
@@ -293,7 +357,7 @@ export default function ChatsPage() {
                     : ""}
                 </span>
                 <button onClick={() => setShowNotes((v) => !v)}>
-                  Заметки
+                  <Icon name="note" size={15} /> Заметки
                 </button>
                 <button
                   className={detail.is_resolved ? "" : "primary"}
@@ -308,7 +372,7 @@ export default function ChatsPage() {
             <div className="chat-tags-row">
               {detail.tags.map((t) => (
                 <span key={t.id} className="tag">
-                  {t.name}{" "}
+                  {t.name}
                   <button
                     className="tag-x"
                     title="Убрать тег"
@@ -368,7 +432,7 @@ export default function ChatsPage() {
                 </button>
               )}
               {messages.map((m) => (
-                <MessageBubble key={m.id} message={m} />
+                <MessageBlock key={m.id} message={m} peerName={peerName} />
               ))}
               <div ref={bottomRef} />
             </div>
@@ -387,12 +451,20 @@ export default function ChatsPage() {
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={onDraftKeyDown}
               />
-              <button className="primary" disabled={send.isPending || !draft.trim()}>
-                Отправить
+              <button
+                className="btn-icon-round"
+                type="submit"
+                aria-label="Отправить"
+                title="Отправить"
+                disabled={send.isPending || !draft.trim()}
+              >
+                <Icon name="send" size={18} />
               </button>
             </form>
             {send.isError && (
-              <div className="error">Не удалось отправить сообщение</div>
+              <div className="error" style={{ padding: "0 20px 12px" }}>
+                Не удалось отправить сообщение
+              </div>
             )}
           </>
         )}

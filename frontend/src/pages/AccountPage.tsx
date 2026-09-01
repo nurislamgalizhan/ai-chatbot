@@ -50,9 +50,7 @@ export default function AccountPage() {
   });
 
   return (
-    <>
-      <h1>Учётная запись</h1>
-
+    <div className="page-narrow">
       <div className="panel">
         <h2>Администратор</h2>
         {account.data ? (
@@ -175,6 +173,6 @@ export default function AccountPage() {
           <span className="muted">Загрузка…</span>
         )}
       </div>
-    </>
+    </div>
   );
 }
