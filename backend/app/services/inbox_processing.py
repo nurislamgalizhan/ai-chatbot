@@ -23,6 +23,7 @@ from app.models.enums import (
     MsgSource,
     MsgState,
 )
+from app.services.chat_modes import on_operator_message
 from app.services.chats import (
     clear_attention,
     insert_inbound_message,
@@ -140,6 +141,8 @@ async def _handle_operator_phone(
     chat = await db.get(Chat, chat_id)
     if chat is not None:
         await clear_attention(db, chat, AttentionClearedReason.OPERATOR_PHONE_REPLY)
+        # ...and mutes/pauses AI for this chat (SPEC §7).
+        await on_operator_message(db, chat, source=MsgSource.OPERATOR_PHONE)
 
 
 async def _handle_api_echo(

@@ -7,9 +7,12 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   attachTag,
+  ChatDetail,
   ChatFilter,
   ChatListItem,
   ChatMessage,
+  ChatModeValue,
+  setChatMode,
   createNote,
   createTag,
   detachTag,
@@ -44,6 +47,21 @@ const FILTERS: { key: ChatFilter; label: string }[] = [
   { key: "unread", label: "Непрочитанные" },
   { key: "unresolved", label: "Нерешённые" },
 ];
+
+const PAUSE_PRESETS = [15, 30, 60, 120];
+
+function modeLabel(mode: string, pausedUntil: string | null): string {
+  switch (mode) {
+    case "AUTO_AI":
+      return "AI-агент активен";
+    case "PAUSED_UNTIL":
+      return pausedUntil ? `Пауза до ${timeShort(pausedUntil)}` : "Пауза";
+    case "HUMAN":
+      return "Оператор";
+    default:
+      return "AI отключён";
+  }
+}
 
 const AVATAR_COLORS = 8;
 
@@ -117,6 +135,85 @@ function MessageBlock({
       )}
       {message.error_code && (
         <div className="plaque danger">Ошибка: {message.error_code}</div>
+      )}
+    </div>
+  );
+}
+
+function ModeControl({
+  detail,
+  onChanged,
+}: {
+  detail: ChatDetail;
+  onChanged: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [customMin, setCustomMin] = useState("");
+  const mutate = useMutation({
+    mutationFn: ({ mode, minutes }: { mode: ChatModeValue; minutes?: number }) =>
+      setChatMode(detail.id, mode, minutes),
+    onSuccess: () => {
+      setOpen(false);
+      setCustomMin("");
+      onChanged();
+    },
+  });
+
+  return (
+    <div className="mode-control">
+      <button
+        className={`mode-pill mode-${detail.mode}`}
+        onClick={() => setOpen((v) => !v)}
+        title="Режим AI в этом чате"
+      >
+        <span className="dot" />
+        {modeLabel(detail.mode, detail.paused_until)}
+        <Icon name="chevron-down" size={13} />
+      </button>
+      {open && (
+        <div className="menu">
+          <button onClick={() => mutate.mutate({ mode: "AUTO_AI" })}>
+            AI-агент активен
+          </button>
+          <div className="menu-sep">Пауза</div>
+          {PAUSE_PRESETS.map((m) => (
+            <button
+              key={m}
+              onClick={() => mutate.mutate({ mode: "PAUSED_UNTIL", minutes: m })}
+            >
+              {m < 60 ? `${m} минут` : `${m / 60} час${m === 120 ? "а" : ""}`}
+            </button>
+          ))}
+          <form
+            className="menu-custom"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const minutes = Number(customMin);
+              if (minutes >= 1 && minutes <= 1440) {
+                mutate.mutate({ mode: "PAUSED_UNTIL", minutes });
+              }
+            }}
+          >
+            <input
+              type="number"
+              min={1}
+              max={1440}
+              placeholder="своё, мин"
+              value={customMin}
+              onChange={(e) => setCustomMin(e.target.value)}
+            />
+          </form>
+          <div className="menu-sep" />
+          <button onClick={() => mutate.mutate({ mode: "HUMAN" })}>
+            Оператор (AI молчит)
+          </button>
+          <button
+            className="menu-danger"
+            onClick={() => mutate.mutate({ mode: "DISABLED" })}
+          >
+            Отключить AI в этом чате
+          </button>
+        </div>
       )}
     </div>
   );
@@ -306,6 +403,11 @@ export default function ChatsPage() {
                     )}
                   </span>
                   <span className="chat-item-flags">
+                    {chat.mode !== "AUTO_AI" && (
+                      <span className={`tag mode-tag mode-${chat.mode}`}>
+                        {modeLabel(chat.mode, chat.paused_until)}
+                      </span>
+                    )}
                     {chat.needs_attention && (
                       <span className="badge attention">требует внимания</span>
                     )}
@@ -356,6 +458,15 @@ export default function ChatsPage() {
                     ? `$${detail.total_cost_usd.toFixed(4)}`
                     : ""}
                 </span>
+                <ModeControl
+                  detail={detail}
+                  onChanged={() => {
+                    void queryClient.invalidateQueries({
+                      queryKey: ["chat", selectedId],
+                    });
+                    void queryClient.invalidateQueries({ queryKey: ["chats"] });
+                  }}
+                />
                 <button onClick={() => setShowNotes((v) => !v)}>
                   <Icon name="note" size={15} /> Заметки
                 </button>

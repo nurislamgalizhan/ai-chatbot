@@ -17,6 +17,7 @@ from redis.asyncio import Redis
 from app.config import get_settings
 from app.db.engine import build_engine, build_sessionmaker
 from app.observability.logging import configure_logging
+from app.services.chat_modes import resume_expired_pauses
 from app.services.inbox_processing import process_inbound_batch, reconcile_outbox
 from app.whatsapp.green_api import GreenApiProvider
 from app.whatsapp.outbox import OutboxFlusher
@@ -38,6 +39,7 @@ _POLL_ERROR_BACKOFF_START = 5.0
 _POLL_ERROR_BACKOFF_CAP = 60.0
 _IDLE_WITHOUT_INSTANCE_SECONDS = 60.0
 _DOMAIN_SYNC_IDLE_SECONDS = 1.0
+_MODE_SCHEDULER_INTERVAL_SECONDS = 5.0
 
 
 async def _heartbeat_loop(redis: Redis, stop: asyncio.Event) -> None:
@@ -124,6 +126,22 @@ async def _domain_sync_loop(
             await _wait(stop, _DOMAIN_SYNC_IDLE_SECONDS)
 
 
+async def _mode_scheduler_loop(
+    sessionmaker: async_sessionmaker[AsyncSession], stop: asyncio.Event
+) -> None:
+    """Active return from PAUSED_UNTIL (never a lazy check, SPEC §7)."""
+    while not stop.is_set():
+        try:
+            async with sessionmaker() as db:
+                resumed = await resume_expired_pauses(db)
+                await db.commit()
+            if resumed:
+                logger.info("pauses_resumed", count=resumed)
+        except Exception:
+            logger.exception("mode_scheduler_error")
+        await _wait(stop, _MODE_SCHEDULER_INTERVAL_SECONDS)
+
+
 async def _wait(stop: asyncio.Event, seconds: float) -> None:
     try:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
@@ -163,6 +181,7 @@ async def run() -> None:
             group.create_task(_polling_loop(settings, sessionmaker, provider, instance_pk, stop))
             group.create_task(_outbox_loop(settings, sessionmaker, provider, stop))
             group.create_task(_domain_sync_loop(sessionmaker, stop))
+            group.create_task(_mode_scheduler_loop(sessionmaker, stop))
     finally:
         if provider is not None:
             await provider.aclose()

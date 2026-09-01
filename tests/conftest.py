@@ -37,6 +37,8 @@ TEST_PASSWORD = "correct-horse-battery-staple"
 TEST_PHONE = "+77010000001"
 
 APP_TABLES = (
+    "settings",
+    "chat_mode_history",
     "audit_log",
     "login_challenges",
     "admin_sessions",
@@ -151,6 +153,14 @@ def admin_factory(
             await engine.dispose()
 
     return _create
+
+
+@pytest.fixture
+async def authed_client(client, settings, admin_factory):
+    """Logged-in client + CSRF headers for mutating requests."""
+    admin = await admin_factory()
+    csrf = await login(client, settings, admin)
+    return client, {"X-CSRF-Token": csrf}
 
 
 def totp_code(secret: str, offset_steps: int = 0) -> str:

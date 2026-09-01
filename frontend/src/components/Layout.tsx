@@ -1,12 +1,40 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { getAccount, logout } from "../api/auth";
+import { getAiSwitch, setAiSwitch } from "../api/system";
 import Icon from "./icons";
 
 const PAGE_TITLES: Record<string, string> = {
   "/": "Чаты",
   "/account": "Учётная запись",
 };
+
+function GlobalAiSwitch() {
+  const queryClient = useQueryClient();
+  const state = useQuery({
+    queryKey: ["ai-switch"],
+    queryFn: getAiSwitch,
+    refetchInterval: 15000,
+  });
+  const toggle = useMutation({
+    mutationFn: (enabled: boolean) => setAiSwitch(enabled),
+    onSuccess: () =>
+      void queryClient.invalidateQueries({ queryKey: ["ai-switch"] }),
+  });
+  if (!state.data) return null;
+  const enabled = state.data.enabled;
+  return (
+    <button
+      className={enabled ? "ai-global on" : "ai-global off"}
+      disabled={toggle.isPending}
+      onClick={() => toggle.mutate(!enabled)}
+      title="Глобальный аварийный выключатель: глушит AI во всех чатах, не меняя режимы отдельных чатов"
+    >
+      <span className="dot" />
+      {enabled ? "AI-агент активен" : "AI отключён глобально"}
+    </button>
+  );
+}
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).slice(0, 2);
@@ -56,7 +84,9 @@ export default function Layout() {
       <div className="main-column">
         <header className="topbar">
           <h1>{PAGE_TITLES[pathname] ?? "Админ-панель"}</h1>
-          {account.data && (
+          <div className="topbar-right">
+            <GlobalAiSwitch />
+            {account.data && (
             <div className="user-pill">
               <span className="avatar">{initials(account.data.full_name)}</span>
               <span className="who">
@@ -64,7 +94,8 @@ export default function Layout() {
                 <span className="sub">{account.data.phone}</span>
               </span>
             </div>
-          )}
+            )}
+          </div>
         </header>
         <main className={pathname === "/" ? "page page--full" : "page"}>
           <Outlet />

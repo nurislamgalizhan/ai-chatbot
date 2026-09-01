@@ -853,3 +853,132 @@ tr:last-child td {
 form.narrow {
   max-width: 380px;
 }
+
+/* ---------- 8. Modes (phase 4) ---------- */
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ai-global,
+.mode-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: var(--radius-pill);
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.ai-global .dot,
+.mode-pill .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ai-global.on .dot,
+.mode-pill.mode-AUTO_AI .dot {
+  background: var(--ok);
+}
+
+.ai-global.off {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.ai-global.off .dot {
+  background: var(--danger);
+}
+
+.mode-pill.mode-PAUSED_UNTIL .dot {
+  background: var(--warn);
+}
+
+.mode-pill.mode-HUMAN .dot {
+  background: var(--text-dim);
+}
+
+.mode-pill.mode-DISABLED {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.mode-pill.mode-DISABLED .dot {
+  background: var(--danger);
+}
+
+.mode-control {
+  position: relative;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 230px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  box-shadow: 0 8px 24px rgba(22, 32, 46, 0.12);
+  padding: 6px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+}
+
+.menu > button {
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-s);
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.menu > button:hover {
+  background: var(--surface-2);
+}
+
+.menu > button.menu-danger {
+  color: var(--danger);
+}
+
+.menu-sep {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 8px 10px 3px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.menu-sep:first-child,
+.menu > .menu-sep:nth-child(2) {
+  border-top: none;
+}
+
+.menu-custom {
+  padding: 4px 10px 8px;
+}
+
+.menu-custom input {
+  padding: 6px 10px;
+  font-size: 12.5px;
+}
+
+.mode-tag.mode-PAUSED_UNTIL {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.mode-tag.mode-DISABLED {
+  background: var(--danger-bg);
+  color: var(--danger);
+}

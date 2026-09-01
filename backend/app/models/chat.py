@@ -82,6 +82,25 @@ class Chat(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class ChatModeHistory(Base):
+    """Journal of mode transitions: who switched, why, until when.
+    Timer extensions update chats.paused_until without a new row here —
+    only actual FROM->TO transitions are recorded."""
+
+    __tablename__ = "chat_mode_history"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("chats.id", ondelete="CASCADE"))
+    from_mode: Mapped[ChatMode] = mapped_column(_enum(ChatMode, "chat_mode"))
+    to_mode: Mapped[ChatMode] = mapped_column(_enum(ChatMode, "chat_mode"))
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("admin_user.id", ondelete="SET NULL")
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
+    paused_until: Mapped[datetime | None]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 class Message(Base):
     __tablename__ = "messages"
 

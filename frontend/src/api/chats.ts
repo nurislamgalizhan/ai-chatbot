@@ -115,3 +115,27 @@ export const listNotes = (chatId: number) =>
 
 export const createNote = (chatId: number, body: string) =>
   api<Note>("POST", `/api/chats/${chatId}/notes`, { body });
+
+export type ChatModeValue = "AUTO_AI" | "HUMAN" | "PAUSED_UNTIL" | "DISABLED";
+
+export const setChatMode = (
+  chatId: number,
+  mode: ChatModeValue,
+  pauseMinutes?: number,
+) =>
+  api<ChatDetail>("POST", `/api/chats/${chatId}/mode`, {
+    mode,
+    pause_minutes: pauseMinutes ?? null,
+  });
+
+export interface ModeHistoryItem {
+  from_mode: string;
+  to_mode: string;
+  by_admin: boolean;
+  reason: string | null;
+  paused_until: string | null;
+  created_at: string;
+}
+
+export const getModeHistory = (chatId: number) =>
+  api<{ items: ModeHistoryItem[] }>("GET", `/api/chats/${chatId}/mode-history`);

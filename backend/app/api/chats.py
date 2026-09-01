@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -12,8 +12,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AdminUser, Chat, ChatTag, InternalNote, Message, Tag
-from app.models.enums import AttentionClearedReason, AttentionReason
+from app.models import AdminUser, Chat, ChatModeHistory, ChatTag, InternalNote, Message, Tag
+from app.models.enums import AttentionClearedReason, AttentionReason, ChatMode
 from app.schemas.chats import (
     AttachTagRequest,
     AttentionRequest,
@@ -22,16 +22,20 @@ from app.schemas.chats import (
     ChatListResponse,
     MessageListResponse,
     MessageResponse,
+    ModeHistoryItem,
+    ModeHistoryResponse,
     NoteCreateRequest,
     NoteListResponse,
     NoteResponse,
     ResolveRequest,
     SendMessageRequest,
     SendMessageResponse,
+    SetModeRequest,
     TagResponse,
 )
 from app.security.audit import record_audit
 from app.security.deps import client_ip, get_db, require_admin
+from app.services.chat_modes import set_mode
 from app.services.chats import clear_attention, send_panel_message, set_attention
 
 router = APIRouter(prefix="/api/chats", tags=["chats"], dependencies=[Depends(require_admin)])
@@ -63,6 +67,25 @@ async def _get_chat(db: AsyncSession, chat_id: int) -> Chat:
     if chat is None:
         raise NOT_FOUND
     return chat
+
+
+async def _detail_response(db: AsyncSession, chat: Chat) -> ChatDetailResponse:
+    tags_map = await _tags_by_chat(db, [chat.id])
+    return ChatDetailResponse(
+        id=chat.id,
+        phone=chat.phone,
+        display_name=chat.display_name,
+        wa_chat_id=chat.wa_chat_id,
+        mode=chat.mode.value,
+        paused_until=chat.paused_until,
+        is_resolved=chat.is_resolved,
+        needs_attention=chat.needs_attention,
+        attention_reason=chat.attention_reason.value if chat.attention_reason else None,
+        last_message_at=chat.last_message_at,
+        total_cost_usd=float(chat.total_cost_usd),
+        created_at=chat.created_at,
+        tags=tags_map.get(chat.id, []),
+    )
 
 
 async def _tags_by_chat(db: AsyncSession, chat_ids: list[int]) -> dict[int, list[TagResponse]]:
@@ -183,22 +206,7 @@ async def open_chat(
         actor_user_id=user.id,
         correlation_id=getattr(request.state, "correlation_id", None),
     )
-    tags_map = await _tags_by_chat(db, [chat.id])
-    return ChatDetailResponse(
-        id=chat.id,
-        phone=chat.phone,
-        display_name=chat.display_name,
-        wa_chat_id=chat.wa_chat_id,
-        mode=chat.mode.value,
-        paused_until=chat.paused_until,
-        is_resolved=chat.is_resolved,
-        needs_attention=chat.needs_attention,
-        attention_reason=chat.attention_reason.value if chat.attention_reason else None,
-        last_message_at=chat.last_message_at,
-        total_cost_usd=float(chat.total_cost_usd),
-        created_at=chat.created_at,
-        tags=tags_map.get(chat.id, []),
-    )
+    return await _detail_response(db, chat)
 
 
 @router.get("/{chat_id}/messages", response_model=MessageListResponse)
@@ -278,21 +286,71 @@ async def resolve_chat(
             ip=client_ip(request),
             correlation_id=getattr(request.state, "correlation_id", None),
         )
-    tags_map = await _tags_by_chat(db, [chat.id])
-    return ChatDetailResponse(
-        id=chat.id,
-        phone=chat.phone,
-        display_name=chat.display_name,
-        wa_chat_id=chat.wa_chat_id,
-        mode=chat.mode.value,
-        paused_until=chat.paused_until,
-        is_resolved=chat.is_resolved,
-        needs_attention=chat.needs_attention,
-        attention_reason=chat.attention_reason.value if chat.attention_reason else None,
-        last_message_at=chat.last_message_at,
-        total_cost_usd=float(chat.total_cost_usd),
-        created_at=chat.created_at,
-        tags=tags_map.get(chat.id, []),
+    return await _detail_response(db, chat)
+
+
+@router.post("/{chat_id}/mode", response_model=ChatDetailResponse)
+async def set_chat_mode(
+    chat_id: int,
+    body: SetModeRequest,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ChatDetailResponse:
+    """Manual mode control (SPEC §7): AUTO_AI / HUMAN / DISABLED, or a
+    timed pause with the duration options from the UI."""
+    chat = await _get_chat(db, chat_id)
+    to_mode = ChatMode(body.mode)
+    paused_until = None
+    if to_mode is ChatMode.PAUSED_UNTIL:
+        if body.pause_minutes is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Для паузы укажите длительность в минутах",
+            )
+        paused_until = datetime.now(UTC) + timedelta(minutes=body.pause_minutes)
+    await set_mode(
+        db,
+        chat,
+        to_mode,
+        changed_by="admin",
+        reason="manual",
+        paused_until=paused_until,
+        actor_user_id=user.id,
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+    return await _detail_response(db, chat)
+
+
+@router.get("/{chat_id}/mode-history", response_model=ModeHistoryResponse)
+async def mode_history(
+    chat_id: int, db: Annotated[AsyncSession, Depends(get_db)]
+) -> ModeHistoryResponse:
+    await _get_chat(db, chat_id)
+    rows = (
+        (
+            await db.execute(
+                select(ChatModeHistory)
+                .where(ChatModeHistory.chat_id == chat_id)
+                .order_by(ChatModeHistory.id.desc())
+                .limit(50)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return ModeHistoryResponse(
+        items=[
+            ModeHistoryItem(
+                from_mode=r.from_mode.value,
+                to_mode=r.to_mode.value,
+                by_admin=r.actor_user_id is not None,
+                reason=r.reason,
+                paused_until=r.paused_until,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
     )
 
 

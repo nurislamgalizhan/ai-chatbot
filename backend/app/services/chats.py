@@ -19,6 +19,7 @@ from app.models.enums import (
     MsgState,
 )
 from app.security.audit import record_audit
+from app.services.chat_modes import on_operator_message
 from app.whatsapp.outbox import enqueue_text
 
 if TYPE_CHECKING:
@@ -222,6 +223,10 @@ async def send_panel_message(
     )
     chat.last_actor = LastActor.HUMAN
     chat.last_message_at = _now()
+    # A human replied from the panel: mute/pause AI per settings (SPEC §7).
+    await on_operator_message(
+        db, chat, source=MsgSource.OPERATOR_PANEL, correlation_id=correlation_id
+    )
     await record_audit(
         db,
         action="chat.panel_message_sent",

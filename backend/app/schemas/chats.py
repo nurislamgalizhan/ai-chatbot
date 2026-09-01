@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -83,6 +84,26 @@ class SendMessageRequest(BaseModel):
 class SendMessageResponse(BaseModel):
     message_id: int
     created: bool
+
+
+class SetModeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["AUTO_AI", "HUMAN", "PAUSED_UNTIL", "DISABLED"]
+    pause_minutes: int | None = Field(default=None, ge=1, le=1440)
+
+
+class ModeHistoryItem(BaseModel):
+    from_mode: str
+    to_mode: str
+    by_admin: bool
+    reason: str | None
+    paused_until: datetime | None
+    created_at: datetime
+
+
+class ModeHistoryResponse(BaseModel):
+    items: list[ModeHistoryItem]
 
 
 class ResolveRequest(BaseModel):
