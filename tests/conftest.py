@@ -37,6 +37,14 @@ TEST_PASSWORD = "correct-horse-battery-staple"
 TEST_PHONE = "+77010000001"
 
 APP_TABLES = (
+    "alert_notifications",
+    "semantic_cache",
+    "budget_reservations",
+    "budget_ledger",
+    "fx_rates",
+    "model_prices",
+    "ai_calls",
+    "agent_instructions",
     "kb_processing_log",
     "kb_faq_misses",
     "kb_faq_patterns",

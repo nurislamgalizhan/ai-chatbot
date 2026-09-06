@@ -18,6 +18,9 @@ class MsgState(StrEnum):
     PROCESSING = "PROCESSING"
     GENERATED = "GENERATED"
     SENT = "SENT"
+    # Terminal state of an INBOUND customer message once its reply exists;
+    # SENT stays the terminal state of outbound messages only.
+    ANSWERED = "ANSWERED"
     FAILED_RETRYABLE = "FAILED_RETRYABLE"
     FAILED_FINAL = "FAILED_FINAL"
     IGNORED = "IGNORED"
@@ -91,3 +94,30 @@ class SourceType(StrEnum):
     MANUAL_TEXT = "manual_text"
     FILE = "file"
     FAQ = "faq"
+
+
+class CallType(StrEnum):
+    CHAT = "chat"
+    TRANSCRIPTION = "transcription"
+    EMBEDDING = "embedding"
+    VISION = "vision"
+
+
+class BudgetScope(StrEnum):
+    GLOBAL_DAY = "global_day"
+    GLOBAL_MONTH = "global_month"
+    CHAT = "chat"
+    USER_DAY = "user_day"
+
+
+class PriceUnit(StrEnum):
+    PER_1M_INPUT = "per_1m_input"
+    PER_1M_CACHED_INPUT = "per_1m_cached_input"
+    PER_1M_OUTPUT = "per_1m_output"
+    PER_MINUTE_AUDIO = "per_minute_audio"
+
+
+class ReservationStatus(StrEnum):
+    HELD = "held"
+    SETTLED = "settled"
+    RELEASED = "released"

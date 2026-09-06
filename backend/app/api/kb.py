@@ -59,6 +59,7 @@ from app.services.kb_faq import build_pattern, match_faq, missing_pattern_langua
 from app.services.kb_indexing import mark_for_indexing
 from app.services.kb_search import search_chunks
 from app.services.kb_text import detect_language, normalize_query, token_key
+from app.services.semantic_cache import bump_kb_version
 
 router = APIRouter(prefix="/api/kb", tags=["kb"], dependencies=[Depends(require_admin)])
 
@@ -164,6 +165,9 @@ async def create_document(
             status_code=status.HTTP_409_CONFLICT,
             detail="Документ с таким названием в этой категории уже есть",
         ) from exc
+    # Any knowledge mutation invalidates the semantic cache (kb_version
+    # is part of the cache key).
+    await bump_kb_version(db)
     await record_audit(
         db,
         action="kb.document_created",
@@ -224,6 +228,7 @@ async def update_document(
     # Any of these can change RAG eligibility or content -> reindex.
     if content_changed or {"status", "is_searchable"} & changes.keys():
         mark_for_indexing(document)
+    await bump_kb_version(db)
     await db.flush()
     await record_audit(
         db,
@@ -261,6 +266,7 @@ async def delete_document(
     document.deleted_at = datetime.now(UTC)
     document.index_state = "not_indexed"
     await db.execute(delete(KbChunk).where(KbChunk.document_id == document.id))
+    await bump_kb_version(db)
     await record_audit(
         db,
         action="kb.document_deleted",
@@ -481,6 +487,7 @@ async def update_faq_answer(
     before = {"status": getattr(faq, status_field).value}
     setattr(faq, answer_field, answer)
     setattr(faq, status_field, new_status)
+    await bump_kb_version(db)
     await db.flush()
     await record_audit(
         db,
@@ -549,6 +556,7 @@ async def activate_faq(
                 detail=f"Нужны формулировки на языках: {', '.join(missing)}",
             )
     faq.is_active = body.is_active
+    await bump_kb_version(db)
     await db.flush()
     await record_audit(
         db,
@@ -692,7 +700,7 @@ async def search_preview(
                 content=h.content,
                 score=round(h.score, 4),
             )
-            for h in found
+            for h in found.hits
         ]
     return SearchResponse(
         faq_hit=faq.answer if faq else None,

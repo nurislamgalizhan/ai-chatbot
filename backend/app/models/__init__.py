@@ -1,4 +1,14 @@
 from app.models.admin import AdminSession, AdminUser, LoginChallenge, TotpRecoveryCode
+from app.models.ai import (
+    AgentInstruction,
+    AiCall,
+    AlertNotification,
+    BudgetLedger,
+    BudgetReservation,
+    FxRate,
+    ModelPrice,
+    SemanticCacheEntry,
+)
 from app.models.audit import AuditLog
 from app.models.chat import (
     Chat,
@@ -28,12 +38,18 @@ from app.models.whatsapp import (
 __all__ = [
     "AdminSession",
     "AdminUser",
+    "AgentInstruction",
+    "AiCall",
+    "AlertNotification",
     "AppSetting",
     "AuditLog",
+    "BudgetLedger",
+    "BudgetReservation",
     "Chat",
     "ChatMemory",
     "ChatModeHistory",
     "ChatTag",
+    "FxRate",
     "InboundNotification",
     "InternalNote",
     "KbChunk",
@@ -44,6 +60,8 @@ __all__ = [
     "KbProcessingLog",
     "LoginChallenge",
     "Message",
+    "ModelPrice",
+    "SemanticCacheEntry",
     "SystemEvent",
     "Tag",
     "TotpRecoveryCode",

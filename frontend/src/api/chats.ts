@@ -139,3 +139,28 @@ export interface ModeHistoryItem {
 
 export const getModeHistory = (chatId: number) =>
   api<{ items: ModeHistoryItem[] }>("GET", `/api/chats/${chatId}/mode-history`);
+
+export interface AiCallDetail {
+  model: string;
+  call_type: string;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  cost_usd: string;
+  cost_kzt: string;
+  latency_ms: number | null;
+  cache_hit: boolean;
+  instruction_version: number | null;
+  reasoning_effort: string | null;
+  rag_chunks: { chunk_id: number; title: string | null; content: string }[];
+  created_at: string;
+}
+
+export interface AiCallResponse {
+  found: boolean;
+  call: AiCallDetail | null;
+}
+
+export const getAiCall = (chatId: number, messageId: number) =>
+  api<AiCallResponse>("GET", `/api/chats/${chatId}/messages/${messageId}/ai-call`);

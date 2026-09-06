@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -149,3 +149,27 @@ class AttachTagRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tag_id: int
+
+
+class AiCallDetail(BaseModel):
+    """The "почему так" block for one AI message: what it cost and why."""
+
+    model: str
+    call_type: str
+    input_tokens: int
+    cached_input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    cost_usd: str
+    cost_kzt: str
+    latency_ms: int | None
+    cache_hit: bool
+    instruction_version: int | None
+    reasoning_effort: str | None
+    rag_chunks: list[dict[str, Any]]
+    created_at: datetime
+
+
+class AiCallDetailResponse(BaseModel):
+    found: bool
+    call: AiCallDetail | None = None

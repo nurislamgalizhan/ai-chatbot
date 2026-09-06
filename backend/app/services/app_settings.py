@@ -24,11 +24,63 @@ OPERATOR_PAUSE_MINUTES = "operator_pause_minutes"
 # Every new operator message extends the running pause timer.
 OPERATOR_PAUSE_EXTEND = "operator_pause_extend"
 
+# --- phase 6 keys: context and output caps (SPEC §9.3) ---
+MAX_INPUT_TOKENS = "max_input_tokens"
+MAX_OUTPUT_TOKENS = "max_output_tokens"
+MAX_AI_CALLS_PER_MESSAGE = "max_ai_calls_per_message"
+# --- phase 6 keys: money (limits are entered in ₸, SPEC §9.3) ---
+MAX_AI_COST_PER_DIALOG_KZT = "max_ai_cost_per_dialog_kzt"
+MAX_AI_COST_PER_USER_PER_DAY_KZT = "max_ai_cost_per_user_per_day_kzt"
+DAILY_AI_BUDGET_KZT = "daily_ai_budget_kzt"
+MONTHLY_AI_BUDGET_KZT = "monthly_ai_budget_kzt"
+# --- phase 6 keys: pipeline behaviour ---
+DEBOUNCE_SECONDS = "debounce_seconds"
+MAX_MESSAGES_PER_USER_PER_MINUTE = "max_messages_per_user_per_minute"
+MAX_MESSAGES_PER_USER_PER_HOUR = "max_messages_per_user_per_hour"
+SPAM_REPEAT_THRESHOLD = "spam_repeat_threshold"
+# Messages older than this are never answered by AI (owner decision
+# 2026-09-06: 1 hour) — they get IGNORED + needs_attention instead.
+AI_MAX_MESSAGE_AGE_MINUTES = "ai_max_message_age_minutes"
+CIRCUIT_BREAKER_FAILURES = "circuit_breaker_failures"
+CIRCUIT_BREAKER_COOLDOWN_MINUTES = "circuit_breaker_cooldown_minutes"
+# Domains the model may link to in answers; anything else fails output
+# validation and the reply is replaced with the handoff template.
+ALLOWED_LINK_DOMAINS = "allowed_link_domains"
+# --- phase 6 keys: semantic cache ---
+# Off by default (owner-visible risk/benefit tradeoff: stale answers vs
+# pennies saved at current traffic).
+SEMANTIC_CACHE_ENABLED = "semantic_cache_enabled"
+SEMANTIC_CACHE_TTL_HOURS = "semantic_cache_ttl_hours"
+# Monotonic counter bumped by EVERY kb_documents/kb_faq mutation; part of
+# the cache key, so bumping invalidates the whole cache without a scan.
+KB_VERSION = "kb_version"
+
 DEFAULTS: dict[str, Any] = {
     EMERGENCY_AI_OFF: False,
     PANEL_REPLY_MODE: "PAUSED_UNTIL",
     OPERATOR_PAUSE_MINUTES: 60,
     OPERATOR_PAUSE_EXTEND: True,
+    MAX_INPUT_TOKENS: 12000,
+    MAX_OUTPUT_TOKENS: 350,
+    MAX_AI_CALLS_PER_MESSAGE: 2,
+    MAX_AI_COST_PER_DIALOG_KZT: 20,
+    MAX_AI_COST_PER_USER_PER_DAY_KZT: 50,
+    DAILY_AI_BUDGET_KZT: 300,
+    MONTHLY_AI_BUDGET_KZT: 3000,
+    DEBOUNCE_SECONDS: 3,
+    MAX_MESSAGES_PER_USER_PER_MINUTE: 5,
+    MAX_MESSAGES_PER_USER_PER_HOUR: 30,
+    SPAM_REPEAT_THRESHOLD: 5,
+    AI_MAX_MESSAGE_AGE_MINUTES: 60,
+    CIRCUIT_BREAKER_FAILURES: 5,
+    CIRCUIT_BREAKER_COOLDOWN_MINUTES: 10,
+    # Empty = the model may not link anywhere; the owner allowlists
+    # domains (e.g. a maps service) in the admin. FAQ answers are owner
+    # text and are not subject to this check.
+    ALLOWED_LINK_DOMAINS: [],
+    SEMANTIC_CACHE_ENABLED: False,
+    SEMANTIC_CACHE_TTL_HOURS: 24,
+    KB_VERSION: 0,
 }
 
 

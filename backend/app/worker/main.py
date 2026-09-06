@@ -8,23 +8,27 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
 from redis.asyncio import Redis
 
+from app.ai.chat_provider import ChatError, ChatProvider, OpenAIChatProvider
 from app.ai.embeddings import EmbeddingError, EmbeddingProvider, OpenAIEmbeddingProvider
 from app.config import get_settings
 from app.db.engine import build_engine, build_sessionmaker
 from app.observability.logging import configure_logging
+from app.services.budget import sweep_stale_holds
 from app.services.chat_modes import resume_expired_pauses
+from app.services.generation import GenerationDeps
 from app.services.inbox_processing import process_inbound_batch, reconcile_outbox
 from app.services.kb_indexing import process_pending_documents
 from app.whatsapp.green_api import GreenApiProvider
 from app.whatsapp.outbox import OutboxFlusher
 from app.whatsapp.provider import ProviderError
 from app.whatsapp.receiver import PollingReceiver, ensure_instance_registered
+from app.worker.pipeline import AiPipeline
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -43,6 +47,9 @@ _IDLE_WITHOUT_INSTANCE_SECONDS = 60.0
 _DOMAIN_SYNC_IDLE_SECONDS = 1.0
 _MODE_SCHEDULER_INTERVAL_SECONDS = 5.0
 _KB_INDEXING_IDLE_SECONDS = 5.0
+_PIPELINE_IDLE_SECONDS = 1.0
+_RECOVERY_INTERVAL_SECONDS = 60.0
+_STALE_HOLD_MINUTES = 15
 
 
 async def _heartbeat_loop(redis: Redis, stop: asyncio.Event) -> None:
@@ -170,6 +177,41 @@ async def _kb_indexing_loop(
             await _wait(stop, _KB_INDEXING_IDLE_SECONDS)
 
 
+async def _pipeline_loop(pipeline: AiPipeline, stop: asyncio.Event) -> None:
+    """QUEUED customer messages -> AI replies (SPEC §6). Survives any
+    exception: a crash-loop here would silence the whole bot."""
+    while not stop.is_set():
+        handled = 0
+        try:
+            handled = await pipeline.run_once()
+        except Exception:
+            logger.exception("pipeline_error")
+        if handled == 0:
+            await _wait(stop, _PIPELINE_IDLE_SECONDS)
+
+
+async def _recovery_loop(
+    pipeline: AiPipeline,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    stop: asyncio.Event,
+) -> None:
+    """Orphaned PROCESSING claims + stale budget holds (SPEC §9.2.4)."""
+    while not stop.is_set():
+        try:
+            recovered = await pipeline.sweep_processing()
+            if recovered:
+                logger.warning("pipeline_orphans_recovered", count=recovered)
+            released = await sweep_stale_holds(
+                sessionmaker,
+                older_than=datetime.now(UTC) - timedelta(minutes=_STALE_HOLD_MINUTES),
+            )
+            if released:
+                logger.warning("budget_holds_swept", count=released)
+        except Exception:
+            logger.exception("recovery_loop_error")
+        await _wait(stop, _RECOVERY_INTERVAL_SECONDS)
+
+
 async def _wait(stop: asyncio.Event, seconds: float) -> None:
     try:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
@@ -190,11 +232,16 @@ async def run() -> None:
         loop.add_signal_handler(sig, stop.set)
 
     embedding_provider: EmbeddingProvider | None = None
+    chat_provider: ChatProvider | None = None
     if settings.openai_api_key:
         try:
             embedding_provider = OpenAIEmbeddingProvider(settings)
         except EmbeddingError:
             logger.exception("embedding_provider_init_failed")
+        try:
+            chat_provider = OpenAIChatProvider(settings)
+        except ChatError:
+            logger.exception("chat_provider_init_failed")
 
     provider: GreenApiProvider | None = None
     instance_pk: int | None = None
@@ -204,12 +251,23 @@ async def run() -> None:
             instance_pk = await ensure_instance_registered(db, settings)
             await db.commit()
 
+    pipeline = AiPipeline(
+        GenerationDeps(
+            sessionmaker=sessionmaker,
+            settings=settings,
+            redis=redis,
+            chat_provider=chat_provider,
+            embedding_provider=embedding_provider,
+        )
+    )
+
     logger.info(
         "worker_started",
         env=settings.app_env,
         dry_run=settings.dry_run,
         transport_configured=provider is not None,
         embeddings_configured=embedding_provider is not None,
+        chat_configured=chat_provider is not None,
     )
     try:
         async with asyncio.TaskGroup() as group:
@@ -219,11 +277,15 @@ async def run() -> None:
             group.create_task(_domain_sync_loop(sessionmaker, stop))
             group.create_task(_mode_scheduler_loop(sessionmaker, stop))
             group.create_task(_kb_indexing_loop(settings, sessionmaker, embedding_provider, stop))
+            group.create_task(_pipeline_loop(pipeline, stop))
+            group.create_task(_recovery_loop(pipeline, sessionmaker, stop))
     finally:
         if provider is not None:
             await provider.aclose()
         if embedding_provider is not None:
             await embedding_provider.aclose()
+        if chat_provider is not None:
+            await chat_provider.aclose()
         await redis.aclose()
         await engine.dispose()
         logger.info("worker_stopped")

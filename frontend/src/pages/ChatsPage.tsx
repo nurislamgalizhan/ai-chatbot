@@ -16,6 +16,7 @@ import {
   createNote,
   createTag,
   detachTag,
+  getAiCall,
   listChats,
   listMessages,
   listNotes,
@@ -97,14 +98,77 @@ function timeShort(value: string): string {
     : date.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
 }
 
+/** "Почему так": usage, cost and the KB fragments behind one AI reply.
+ *  Loaded on demand; viewing a chat NEVER calls OpenAI (invariant 16). */
+function WhySoBlock({ chatId, messageId }: { chatId: number; messageId: number }) {
+  const detail = useQuery({
+    queryKey: ["ai-call", chatId, messageId],
+    queryFn: () => getAiCall(chatId, messageId),
+    staleTime: Infinity,
+  });
+  if (detail.isPending) return <div className="why-so muted">Загрузка…</div>;
+  if (detail.isError || !detail.data)
+    return <div className="why-so muted">Не удалось загрузить данные вызова</div>;
+  if (!detail.data.found || !detail.data.call) {
+    return (
+      <div className="why-so muted">
+        Нет данных вызова: ответ дан из FAQ, кэша или шаблона — модель не
+        вызывалась, расходов нет.
+      </div>
+    );
+  }
+  const call = detail.data.call;
+  return (
+    <div className="why-so">
+      <dl className="kv">
+        <dt>Модель</dt>
+        <dd>
+          {call.model}
+          {call.instruction_version != null && ` · инструкция v${call.instruction_version}`}
+          {call.reasoning_effort && ` · effort ${call.reasoning_effort}`}
+        </dd>
+        <dt>Токены</dt>
+        <dd>
+          вход {call.input_tokens} (кэш {call.cached_input_tokens}), выход{" "}
+          {call.output_tokens}, reasoning {call.reasoning_tokens}
+        </dd>
+        <dt>Стоимость</dt>
+        <dd>
+          {call.cost_kzt} ₸ (${call.cost_usd})
+        </dd>
+        {call.latency_ms != null && (
+          <>
+            <dt>Время</dt>
+            <dd>{call.latency_ms} мс</dd>
+          </>
+        )}
+      </dl>
+      {call.rag_chunks.length > 0 && (
+        <details>
+          <summary>Использованные фрагменты ({call.rag_chunks.length})</summary>
+          {call.rag_chunks.map((chunk) => (
+            <div key={chunk.chunk_id} className="why-so-chunk">
+              <strong>{chunk.title ?? `Фрагмент ${chunk.chunk_id}`}</strong>
+              <div className="muted">{chunk.content}</div>
+            </div>
+          ))}
+        </details>
+      )}
+    </div>
+  );
+}
+
 function MessageBlock({
   message,
   peerName,
+  chatId,
 }: {
   message: ChatMessage;
   peerName: string;
+  chatId: number;
 }) {
   const isCustomer = message.direction === "in";
+  const [showWhy, setShowWhy] = useState(false);
   const classes = ["msg", isCustomer ? "from-customer" : "", `src-${message.source}`]
     .filter(Boolean)
     .join(" ");
@@ -124,6 +188,16 @@ function MessageBlock({
         <span className="msg-time">
           {timeShort(message.sent_at ?? message.created_at)}
         </span>
+        {message.source === "ai" && (
+          <button
+            type="button"
+            className="why-so-toggle"
+            title="Почему так: расход, токены, использованные фрагменты"
+            onClick={() => setShowWhy((v) => !v)}
+          >
+            <Icon name="info" size={14} /> почему так
+          </button>
+        )}
       </div>
       {message.media_type && <div className="media-hint">[{message.media_type}]</div>}
       {message.body && <div>{message.body}</div>}
@@ -136,6 +210,7 @@ function MessageBlock({
       {message.error_code && (
         <div className="plaque danger">Ошибка: {message.error_code}</div>
       )}
+      {showWhy && <WhySoBlock chatId={chatId} messageId={message.id} />}
     </div>
   );
 }
@@ -543,7 +618,7 @@ export default function ChatsPage() {
                 </button>
               )}
               {messages.map((m) => (
-                <MessageBlock key={m.id} message={m} peerName={peerName} />
+                <MessageBlock key={m.id} message={m} peerName={peerName} chatId={selectedId!} />
               ))}
               <div ref={bottomRef} />
             </div>

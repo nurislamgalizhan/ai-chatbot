@@ -9,8 +9,10 @@ import { getAccount } from "./api/auth";
 import { ApiError } from "./api/client";
 import Layout from "./components/Layout";
 import AccountPage from "./pages/AccountPage";
+import AgentPage from "./pages/AgentPage";
 import ChatsPage from "./pages/ChatsPage";
 import KnowledgePage from "./pages/KnowledgePage";
+import LimitsPage from "./pages/LimitsPage";
 import LoginPage from "./pages/LoginPage";
 
 const queryClient = new QueryClient({
@@ -42,7 +44,9 @@ const router = createBrowserRouter([
         element: <Layout />,
         children: [
           { path: "/", element: <ChatsPage /> },
+          { path: "/agent", element: <AgentPage /> },
           { path: "/knowledge", element: <KnowledgePage /> },
+          { path: "/limits", element: <LimitsPage /> },
           { path: "/account", element: <AccountPage /> },
         ],
       },

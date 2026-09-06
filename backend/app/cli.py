@@ -18,6 +18,7 @@ from app.services.admin_setup import (
 )
 from app.services.kb_import import import_savvi_export
 from app.services.phone import PhoneValidationError
+from app.services.pricing import seed_default_prices
 
 
 def _read_new_password() -> str:
@@ -96,6 +97,27 @@ async def _cmd_kb_import(source: str) -> int:
     return 0
 
 
+async def _cmd_seed_prices() -> int:
+    settings = get_settings()
+    engine = build_engine(settings)
+    try:
+        async with build_sessionmaker(engine)() as db, db.begin():
+            created = await seed_default_prices(db, settings)
+    finally:
+        await engine.dispose()
+    if not created:
+        print("Все цены уже заведены — ничего не изменено.")
+        return 0
+    print("Заведены стартовые цены (SPEC §9.1):")
+    for line in created:
+        print(f"  {line}")
+    print(
+        "\nВНИМАНИЕ: сверьте цены с актуальной страницей цен OpenAI и при "
+        "расхождении поправьте их в админке (раздел «Лимиты»)."
+    )
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="app.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -105,6 +127,7 @@ def main() -> None:
         "kb-import", help="Import the Savvi export into the knowledge base (drafts)"
     )
     kb_import.add_argument("--source", default="seed/savvi-export.md")
+    sub.add_parser("seed-prices", help="Insert SPEC default model prices (owner-run, idempotent)")
     args = parser.parse_args()
 
     if args.command == "create-admin":
@@ -113,6 +136,8 @@ def main() -> None:
         raise SystemExit(asyncio.run(_cmd_reset_admin_password()))
     if args.command == "kb-import":
         raise SystemExit(asyncio.run(_cmd_kb_import(args.source)))
+    if args.command == "seed-prices":
+        raise SystemExit(asyncio.run(_cmd_seed_prices()))
 
 
 if __name__ == "__main__":

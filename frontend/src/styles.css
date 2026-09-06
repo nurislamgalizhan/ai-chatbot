@@ -1131,3 +1131,253 @@ textarea {
   background: var(--ok-bg);
   color: var(--ok);
 }
+
+/* ---------- Agent page (phase 6) ---------- */
+.agent-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  align-items: start;
+}
+.agent-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.section-head h2 {
+  margin: 0 0 4px;
+}
+.instruction-editor {
+  width: 100%;
+  font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  resize: vertical;
+  min-height: 320px;
+}
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+.form-row label,
+.limit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.form-row label input,
+.form-row label select {
+  font-weight: 400;
+}
+.template-row {
+  display: grid;
+  grid-template-columns: 160px repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.template-label {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.actions-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.version-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.version-list li {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  padding: 10px 12px;
+}
+.version-list li.active {
+  border-color: var(--ok);
+  background: var(--ok-bg);
+}
+.version-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.version-preview {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.version-actions {
+  display: flex;
+  gap: 6px;
+}
+.version-actions button {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.sandbox form {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+.sandbox form input {
+  flex: 1;
+}
+.sandbox-result {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.sandbox-answer {
+  flex-basis: 100%;
+  background: var(--surface-2);
+  border-radius: var(--radius-m);
+  padding: 10px 12px;
+  white-space: pre-wrap;
+}
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 8px 0 0;
+  font-size: 13px;
+  flex-basis: 100%;
+}
+.kv dt {
+  color: var(--text-dim);
+}
+.kv dd {
+  margin: 0;
+}
+
+/* ---------- Limits page (phase 6) ---------- */
+.limits-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 980px;
+}
+.dry-run-note {
+  font-size: 13px;
+}
+.stat-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.card.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.card.stat strong {
+  font-size: 22px;
+}
+.limits-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px 16px;
+  margin-top: 8px;
+}
+.limit-field span:first-child {
+  color: var(--text);
+}
+.limit-field .muted {
+  font-weight: 400;
+  font-size: 12px;
+}
+.limit-field.checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+}
+.limit-field.checkbox input {
+  width: auto;
+}
+.inline-form {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+.inline-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.plain-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 8px 0;
+}
+.plain-table th,
+.plain-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.plain-table th {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+/* ---------- "Почему так" (phase 6) ---------- */
+.why-so-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 2px 8px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.why-so-toggle:hover {
+  color: var(--accent);
+  background: transparent;
+}
+.why-so {
+  margin-top: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+  font-size: 12px;
+}
+.why-so-chunk {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: var(--surface-2);
+  border-radius: var(--radius-s);
+}
+
+@media (max-width: 1100px) {
+  .agent-layout {
+    grid-template-columns: 1fr;
+  }
+}

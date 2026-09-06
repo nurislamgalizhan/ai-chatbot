@@ -212,6 +212,7 @@ paused_until, created_at. Индекс `(chat_id, created_at)`.
 | transcript | text NULL | голосовые: остаётся после удаления файла |
 | state | msg_state | см. §20 |
 | retry_count | int NOT NULL default 0 | |
+| next_attempt_at | timestamptz NULL | бэкофф ретраев пайплайна; у PROCESSING — lease для sweeper'а (фаза 6) |
 | error_code / error_detail | text NULL | |
 | correlation_id | text NOT NULL | сквозной до OpenAI и отправки |
 | delivery_status | text NULL | из статус-уведомлений |
@@ -349,8 +350,10 @@ id, correlation_id, chat_id FK NULL, message_id FK NULL, call_type
 (`chat`/`transcription`/`embedding`/`vision`), model, input_tokens,
 cached_input_tokens, output_tokens, reasoning_tokens, audio_seconds,
 cost_usd numeric(12,8), cost_kzt numeric(12,4), latency_ms int,
-rag_chunk_ids jsonb, cache_hit bool, reasoning_effort text, status,
-error_code, created_at.
+rag_chunk_ids jsonb, cache_hit bool, reasoning_effort text,
+instruction_version int NULL (какая версия инструкции отвечала — для
+«почему так»), status, error_code, created_at. `chat_id NULL` = вызов
+из песочницы: реальные деньги учитываются и без чата.
 
 `cost_kzt` фиксируется по курсу на момент вызова — смена курса не
 переписывает исторические цифры (обязательный тест SPEC §17).
@@ -393,6 +396,10 @@ updated_at.
 
 id, ledger_id FK, correlation_id, amount_usd, status
 (`held`/`settled`/`released`), created_at, settled_at.
+correlation_id — суб-корреляция вида `{correlation}:main:a{attempt}`:
+несколько платных вызовов и повторные попытки одного сообщения не
+конфликтуют по UNIQUE; released-резерв терминален, новая попытка берёт
+новый.
 
 `UNIQUE (correlation_id, ledger_id)` — идемпотентность settle/release:
 ретрай той же операции не спишет деньги дважды. Индекс
@@ -420,7 +427,9 @@ author_user_id FK, created_at.
 
 ### 18.3 `semantic_cache`
 
-id, normalized_query_hash text, language, category, kb_version int,
+id, normalized_query_hash text, language, category text NOT NULL
+default '' (пустая строка вместо NULL — иначе UNIQUE-ключ не
+дедуплицирует), kb_version int,
 answer text, hit_count int, created_at, expires_at.
 
 `UNIQUE (normalized_query_hash, language, category, kb_version)` — ключ кэша
@@ -463,8 +472,9 @@ detail jsonb, created_at.
 
 - `chat_mode`: `AUTO_AI`, `HUMAN`, `PAUSED_UNTIL`, `DISABLED`
 - `msg_state`: `RECEIVED`, `QUEUED`, `PROCESSING`, `GENERATED`, `SENT`,
-  `FAILED_RETRYABLE`, `FAILED_FINAL`, `IGNORED`, `HANDED_TO_HUMAN`,
-  `BLOCKED_BY_LIMIT`
+  `ANSWERED` (терминал ВХОДЯЩЕГО после ответа; добавлено в фазе 6 —
+  `SENT` остался терминалом исходящих), `FAILED_RETRYABLE`,
+  `FAILED_FINAL`, `IGNORED`, `HANDED_TO_HUMAN`, `BLOCKED_BY_LIMIT`
 - `msg_source`: `customer`, `ai`, `operator_panel`, `operator_phone`, `system`
 - `media_type`: `voice`, `image`, `video`, `gif`, `sticker`, `document`, `other`
 - `answer_status`: `absent`, `machine`, `approved`

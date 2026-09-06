@@ -12,9 +12,21 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AdminUser, Chat, ChatModeHistory, ChatTag, InternalNote, Message, Tag
+from app.models import (
+    AdminUser,
+    AiCall,
+    Chat,
+    ChatModeHistory,
+    ChatTag,
+    InternalNote,
+    KbChunk,
+    Message,
+    Tag,
+)
 from app.models.enums import AttentionClearedReason, AttentionReason, ChatMode
 from app.schemas.chats import (
+    AiCallDetail,
+    AiCallDetailResponse,
     AttachTagRequest,
     AttentionRequest,
     ChatDetailResponse,
@@ -475,4 +487,60 @@ async def detach_tag(
         after={"tag_id": tag_id},
         ip=client_ip(request),
         correlation_id=getattr(request.state, "correlation_id", None),
+    )
+
+
+@router.get("/{chat_id}/messages/{message_id}/ai-call", response_model=AiCallDetailResponse)
+async def message_ai_call(
+    chat_id: int,
+    message_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AiCallDetailResponse:
+    """The "почему так" block: usage, cost, latency and the exact KB
+    fragments behind one AI reply. Read-only — never calls OpenAI."""
+    await _get_chat(db, chat_id)
+    call = (
+        await db.execute(
+            select(AiCall)
+            .where(AiCall.chat_id == chat_id, AiCall.message_id == message_id)
+            .order_by(AiCall.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if call is None:
+        # Honest empty state: FAQ/cache/template replies have no paid call.
+        return AiCallDetailResponse(found=False)
+    chunk_previews: list[dict[str, object]] = []
+    if call.rag_chunk_ids:
+        chunks = (
+            (await db.execute(select(KbChunk).where(KbChunk.id.in_(list(call.rag_chunk_ids)))))
+            .scalars()
+            .all()
+        )
+        chunk_previews = [
+            {
+                "chunk_id": chunk.id,
+                "title": (chunk.doc_metadata or {}).get("title"),
+                "content": chunk.content[:400],
+            }
+            for chunk in chunks
+        ]
+    return AiCallDetailResponse(
+        found=True,
+        call=AiCallDetail(
+            model=call.model,
+            call_type=call.call_type.value,
+            input_tokens=call.input_tokens,
+            cached_input_tokens=call.cached_input_tokens,
+            output_tokens=call.output_tokens,
+            reasoning_tokens=call.reasoning_tokens,
+            cost_usd=str(call.cost_usd),
+            cost_kzt=str(call.cost_kzt),
+            latency_ms=call.latency_ms,
+            cache_hit=call.cache_hit,
+            instruction_version=call.instruction_version,
+            reasoning_effort=call.reasoning_effort,
+            rag_chunks=chunk_previews,
+            created_at=call.created_at,
+        ),
     )

@@ -22,3 +22,33 @@ def estimate_tokens(text: str) -> int:
     other = len(text) - cyrillic
     estimate = cyrillic / _CYRILLIC_CHARS_PER_TOKEN + other / _OTHER_CHARS_PER_TOKEN
     return max(1, round(estimate))
+
+
+# --- phase 6: exact counting for context trimming ---
+# Billing never uses these numbers (costs come from factual API usage);
+# exactness only makes the MAX_INPUT_TOKENS trim honest.
+
+_ENCODING = None
+_ENCODING_FAILED = False
+
+
+def count_tokens(text: str) -> int:
+    """Exact o200k_base count; falls back to the estimate (with a logged
+    warning, once) if the encoding cannot be loaded — the worker must not
+    die for lack of tokenizer data, and the trim stays conservative."""
+    global _ENCODING, _ENCODING_FAILED  # noqa: PLW0603 - module-level cache
+    if _ENCODING is None and not _ENCODING_FAILED:
+        try:
+            import tiktoken  # noqa: PLC0415 - lazy: the API process never counts
+
+            _ENCODING = tiktoken.get_encoding("o200k_base")
+        except Exception:  # pragma: no cover - only without baked cache/network
+            _ENCODING_FAILED = True
+            import structlog  # noqa: PLC0415
+
+            structlog.get_logger(__name__).warning(
+                "tiktoken_unavailable", detail="falling back to estimate_tokens"
+            )
+    if _ENCODING is None:  # pragma: no cover
+        return estimate_tokens(text)
+    return len(_ENCODING.encode(text))

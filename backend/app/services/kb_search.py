@@ -41,6 +41,16 @@ class RetrievedChunk:
     category: str | None
 
 
+@dataclass(frozen=True)
+class SearchOutcome:
+    """Hits plus the factual embedding usage — the query embed is a paid
+    call and must be accountable in ai_calls (phase 6)."""
+
+    hits: list[RetrievedChunk]
+    embed_tokens: int
+    embed_model: str
+
+
 async def search_chunks(
     db: AsyncSession,
     provider: EmbeddingProvider,
@@ -51,7 +61,7 @@ async def search_chunks(
     category: str | None = None,
     top_k: int | None = None,
     min_score: float | None = None,
-) -> list[RetrievedChunk]:
+) -> SearchOutcome:
     """Return the chunks worth putting into a prompt (possibly none)."""
     limit = top_k or settings.rag_top_k
     threshold = settings.rag_min_score if min_score is None else min_score
@@ -108,7 +118,9 @@ async def search_chunks(
         threshold=threshold,
         category=category,
     )
-    return results
+    return SearchOutcome(
+        hits=results, embed_tokens=embedded.total_tokens, embed_model=embedded.model
+    )
 
 
 def _is_near_duplicate(candidate: RetrievedChunk, accepted: list[RetrievedChunk]) -> bool:

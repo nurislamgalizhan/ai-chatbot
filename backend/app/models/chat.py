@@ -116,6 +116,9 @@ class Message(Base):
     transcript: Mapped[str | None] = mapped_column(Text)
     state: Mapped[MsgState] = mapped_column(_enum(MsgState, "msg_state"))
     retry_count: Mapped[int] = mapped_column(server_default=text("0"))
+    # Backoff scheduling for the AI pipeline: a retryable failure sets a
+    # future timestamp instead of hot-looping on the same message.
+    next_attempt_at: Mapped[datetime | None]
     error_code: Mapped[str | None] = mapped_column(Text)
     error_detail: Mapped[str | None] = mapped_column(Text)
     correlation_id: Mapped[str | None] = mapped_column(Text)

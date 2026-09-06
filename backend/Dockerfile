@@ -23,6 +23,13 @@ ENV PATH="/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+# Bake the tiktoken encoding into the image: the container has no business
+# downloading tokenizer data at runtime (and may have no egress for it).
+ENV TIKTOKEN_CACHE_DIR=/srv/tiktoken-cache
+RUN mkdir -p /srv/tiktoken-cache \
+    && python -c "import tiktoken; tiktoken.get_encoding('o200k_base')" \
+    && chown -R root:root /srv/tiktoken-cache && chmod -R a+rX /srv/tiktoken-cache
+
 USER app
 
 # Default command: API. The worker overrides this in compose.

@@ -286,7 +286,7 @@ async def test_search_returns_only_relevant_above_threshold(
 
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db:
-        hits = await search_chunks(db, provider, settings_rag, query)
+        hits = (await search_chunks(db, provider, settings_rag, query)).hits
     assert [h.title for h in hits] == ["Абонементы"]
     assert hits[0].score > 0.9
 
@@ -326,7 +326,7 @@ async def test_ineligible_documents_never_reach_retrieval(
         # Sanity: the chunks are still physically there...
         assert (await db.execute(select(KbChunk))).scalars().all()
         # ...and still invisible to retrieval.
-        hits = await search_chunks(db, provider, settings_rag, query)
+        hits = (await search_chunks(db, provider, settings_rag, query)).hits
     assert hits == [], f"{reason} document leaked into retrieval"
 
 
@@ -344,7 +344,7 @@ async def test_search_never_returns_more_than_top_k(db_engine, settings_rag) -> 
     provider = ScriptedEmbeddings(mapping)
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db:
-        hits = await search_chunks(db, provider, settings_rag, query)
+        hits = (await search_chunks(db, provider, settings_rag, query)).hits
     assert len(hits) <= settings_rag.rag_top_k
 
 
@@ -368,5 +368,7 @@ async def test_category_filter(db_engine, settings_rag) -> None:
 
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db:
-        hits = await search_chunks(db, provider, settings_rag, query, category="hotel")
+        hits = (
+            await search_chunks(db, provider, settings_rag, query, category="hotel")
+        ).hits
     assert [h.title for h in hits] == ["Отель"]

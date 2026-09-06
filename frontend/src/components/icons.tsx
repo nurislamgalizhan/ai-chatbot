@@ -71,6 +71,20 @@ const PATHS: Record<string, React.ReactNode> = {
       <line x1="12" y1="17" x2="12" y2="21" />
     </>
   ),
+  wallet: (
+    <>
+      <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" />
+      <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" />
+      <path d="M18 12a2 2 0 0 0 0 4h4v-4z" />
+    </>
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="16" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12.01" y2="8" />
+    </>
+  ),
 };
 
 export type IconName = keyof typeof PATHS & string;
