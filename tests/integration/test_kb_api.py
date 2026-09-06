@@ -213,6 +213,23 @@ async def test_search_preview_returns_faq_answer_without_llm(authed_client) -> N
     assert body["hits"] == []  # no embedding provider configured in tests
 
 
+async def test_search_preview_is_rate_limited(authed_client) -> None:
+    """Недочёт №3: the preview embeds the query (a paid call), so a
+    runaway tab or script must hit a 429, not the OpenAI bill."""
+    client, headers = authed_client
+    statuses = []
+    for _ in range(31):
+        response = await client.post(
+            "/api/kb/search", json={"query": "адрес"}, headers=headers
+        )
+        statuses.append(response.status_code)
+    assert statuses[:30] == [200] * 30
+    assert statuses[30] == 429
+    assert "подождите" in (
+        await client.post("/api/kb/search", json={"query": "адрес"}, headers=headers)
+    ).json()["detail"]
+
+
 async def test_kb_import_is_idempotent_and_creates_drafts(db_engine) -> None:
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():

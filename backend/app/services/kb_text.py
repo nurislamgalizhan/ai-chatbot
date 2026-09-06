@@ -12,6 +12,10 @@ from app.models.enums import KbLanguage
 # Letters unique to Kazakh Cyrillic — the cheapest reliable kk signal.
 # Cyrillic only — a Latin "h" here would misread English as Kazakh.
 _KAZAKH_LETTERS = set("әғқңөұүіһӘҒҚҢӨҰҮІҺ")
+# Share of Kazakh-specific letters among ALL Cyrillic letters required to
+# call the text kk: a lone Kazakh letter (a name like «Айгерім» inside a
+# Russian sentence) must not flip the whole message to kk.
+_KK_RATIO_THRESHOLD = 0.05
 _CYRILLIC_RE = re.compile(r"[а-яёА-ЯЁ]")
 _LATIN_RE = re.compile(r"[a-zA-Z]")
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
@@ -94,15 +98,20 @@ def token_key(text: str) -> list[str]:
 def detect_language(text: str) -> KbLanguage:
     """Cheap heuristic; the LLM path re-checks language itself.
 
-    Kazakh-specific letters win outright; otherwise Cyrillic means ru and
-    Latin means en. Mixed kk/ru text counts as kk so the customer is not
-    answered in the wrong language (owner's language policy).
+    kk requires Kazakh-specific letters to reach _KK_RATIO_THRESHOLD of
+    all Cyrillic letters: genuinely mixed kk/ru text still counts as kk
+    (answering in the wrong language is worse than one extra LLM call —
+    owner's language policy), but a single Kazakh letter carried by a
+    name inside a Russian sentence stays ru. Otherwise Cyrillic means ru
+    and Latin means en.
     """
-    if any(ch in _KAZAKH_LETTERS for ch in text):
+    kazakh = sum(1 for ch in text if ch in _KAZAKH_LETTERS)
+    # _CYRILLIC_RE covers the core а-я range only, so Kazakh-specific
+    # letters are added on top to get the full Cyrillic count.
+    total_cyrillic = len(_CYRILLIC_RE.findall(text)) + kazakh
+    if kazakh and total_cyrillic and kazakh / total_cyrillic >= _KK_RATIO_THRESHOLD:
         return KbLanguage.KK
-    cyrillic = len(_CYRILLIC_RE.findall(text))
-    latin = len(_LATIN_RE.findall(text))
-    if cyrillic == 0 and latin > 0:
+    if total_cyrillic == 0 and _LATIN_RE.search(text):
         return KbLanguage.EN
     return KbLanguage.RU
 

@@ -66,6 +66,24 @@ class BrokenEmbeddings(EmbeddingProvider):
         raise EmbeddingError(msg)
 
 
+class WrongDimensionEmbeddings(EmbeddingProvider):
+    """Succeeds (and gets paid) but returns vectors PostgreSQL cannot
+    store — models any failure that happens AFTER the money is spent."""
+
+    model = "wrong-dim"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def embed(self, texts: list[str]) -> EmbeddingResult:
+        self.calls += 1
+        return EmbeddingResult(
+            vectors=[[0.0, 0.0, 0.0] for _ in texts],
+            model=self.model,
+            total_tokens=len(texts),
+        )
+
+
 async def make_document(
     db_engine,
     *,
@@ -109,9 +127,7 @@ async def test_indexing_creates_chunks_and_log(db_engine, settings_rag) -> None:
     )
     provider = FakeEmbeddingProvider()
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
-    async with maker() as db:
-        assert await process_pending_documents(db, provider, settings_rag) == 1
-        await db.commit()
+    assert await process_pending_documents(maker, provider, settings_rag) == 1
 
     async with maker() as db:
         document = await db.get(KbDocument, doc_id)
@@ -147,11 +163,10 @@ async def test_reindexing_is_idempotent(db_engine, settings_rag) -> None:
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
 
     for _ in range(3):
-        async with maker() as db:
+        async with maker() as db, db.begin():
             document = await db.get(KbDocument, doc_id)
             document.index_state = "pending"
-            await process_pending_documents(db, provider, settings_rag)
-            await db.commit()
+        await process_pending_documents(maker, provider, settings_rag)
 
     async with maker() as db:
         chunks = (
@@ -173,9 +188,7 @@ async def test_draft_and_archived_documents_are_not_indexed(
     )
     provider = FakeEmbeddingProvider()
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
-    async with maker() as db:
-        await process_pending_documents(db, provider, settings_rag)
-        await db.commit()
+    await process_pending_documents(maker, provider, settings_rag)
 
     async with maker() as db:
         chunks = (await db.execute(select(KbChunk))).scalars().all()
@@ -190,9 +203,7 @@ async def test_draft_and_archived_documents_are_not_indexed(
 async def test_embedding_failure_marks_document_failed(db_engine, settings_rag) -> None:
     doc_id = await make_document(db_engine, title="Секции", body="Бокс, карате.")
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
-    async with maker() as db:
-        await process_pending_documents(db, BrokenEmbeddings(), settings_rag)
-        await db.commit()
+    await process_pending_documents(maker, BrokenEmbeddings(), settings_rag)
 
     async with maker() as db:
         document = await db.get(KbDocument, doc_id)
@@ -208,6 +219,40 @@ async def test_embedding_failure_marks_document_failed(db_engine, settings_rag) 
     assert document.index_state == "failed"
     assert "embedding_failed" in document.index_error
     assert log[-1].status == "failed"
+
+
+async def test_failure_after_paid_embed_costs_exactly_one_attempt(
+    db_engine, settings_rag
+) -> None:
+    """Недочёт №1: a failure AFTER the paid embed call (chunks cannot be
+    written) must mark the document `failed` after ONE attempt. Before the
+    fix only EmbeddingError was caught, so the document stayed `pending`
+    and the worker re-paid for the same embeddings every few seconds."""
+    doc_id = await make_document(db_engine, title="Ломаный", body="Текст документа.")
+    provider = WrongDimensionEmbeddings()
+    maker = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    assert await process_pending_documents(maker, provider, settings_rag) == 1
+    assert provider.calls == 1  # paid exactly once
+
+    async with maker() as db:
+        document = await db.get(KbDocument, doc_id)
+        log = (
+            (
+                await db.execute(
+                    select(KbProcessingLog).where(KbProcessingLog.document_id == doc_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert document.index_state == "failed"
+    assert document.index_error
+    assert log[-1].status == "failed"
+
+    # The next worker pass must not touch it: nothing pending, no new pay.
+    assert await process_pending_documents(maker, provider, settings_rag) == 0
+    assert provider.calls == 1
 
 
 async def _index_with(db_engine, settings_rag, provider, doc_id: int) -> None:

@@ -161,9 +161,9 @@ async def _kb_indexing_loop(
     while not stop.is_set():
         handled = 0
         try:
-            async with sessionmaker() as db:
-                handled = await process_pending_documents(db, provider, settings)
-                await db.commit()
+            # Sessions are managed inside: one transaction per document, so
+            # one broken document cannot re-trigger paid embeddings forever.
+            handled = await process_pending_documents(sessionmaker, provider, settings)
         except Exception:
             logger.exception("kb_indexing_error")
         if handled == 0:

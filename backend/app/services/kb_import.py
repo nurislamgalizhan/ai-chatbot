@@ -95,12 +95,17 @@ def normalize_body(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
+# A heading counts as an English screenshot caption (not a KB block name)
+# when this share of its letters is Latin.
+_LATIN_CAPTION_RATIO = 0.8
+
+
 def _is_latin_caption(heading: str) -> bool:
     letters = [ch for ch in heading if ch.isalpha()]
     if not letters:
         return False
     latin = sum(1 for ch in letters if ch.isascii())
-    return latin / len(letters) > 0.8
+    return latin / len(letters) > _LATIN_CAPTION_RATIO
 
 
 def parse_blocks(markdown: str) -> list[tuple[str, str]]:

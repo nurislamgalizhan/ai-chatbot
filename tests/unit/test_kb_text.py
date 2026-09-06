@@ -18,6 +18,17 @@ from app.services.kb_text import chunk_text, detect_language, normalize_query, t
         # worse than one extra LLM call (owner policy).
         ("Здравствуйте, бағасы қанша?", KbLanguage.KK),
         ("", KbLanguage.RU),
+        # A Kazakh name inside a Russian sentence must NOT flip the whole
+        # message to kk (недочёт №2): below the ratio threshold it is ru,
+        # so the FAQ answers in the language the client actually wrote.
+        (
+            "Здравствуйте, меня зовут Айгерім. Хочу записаться на секцию бокса",
+            KbLanguage.RU,
+        ),
+        ("Меня зовут Ұлан, подскажите график работы зала пожалуйста", KbLanguage.RU),
+        # A genuinely short kk question stays kk: the ratio is high even
+        # with a single Kazakh-specific letter.
+        ("қанша тұрады", KbLanguage.KK),
     ],
 )
 def test_detect_language(text: str, expected: KbLanguage) -> None:

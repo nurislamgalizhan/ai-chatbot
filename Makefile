@@ -52,7 +52,7 @@ lint:
 	cd backend && ../.venv/bin/ruff check app && ../.venv/bin/ruff format --check app
 	cd backend && ../.venv/bin/mypy app
 	cd backend && ../.venv/bin/bandit -q -r app -c pyproject.toml
-	.venv/bin/pip-audit --skip-editable -q
+	.venv/bin/pip-audit --skip-editable --progress-spinner off
 
 fmt:
 	cd backend && ../.venv/bin/ruff check --fix app && ../.venv/bin/ruff format app

@@ -14,14 +14,13 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy import delete, select
 
-from app.ai.embeddings import EmbeddingError
 from app.ai.tokens import estimate_tokens
 from app.models import KbChunk, KbDocument, KbProcessingLog
 from app.models.enums import DocStatus
 from app.services.kb_text import chunk_text
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from app.ai.embeddings import EmbeddingProvider
     from app.config import Settings
@@ -129,36 +128,87 @@ async def index_document(
 
 
 async def process_pending_documents(
-    db: AsyncSession, provider: EmbeddingProvider, settings: Settings, limit: int = 5
+    sessionmaker: async_sessionmaker[AsyncSession],
+    provider: EmbeddingProvider,
+    settings: Settings,
+    limit: int = 5,
 ) -> int:
-    """Worker step: index queued documents one transaction at a time."""
-    documents = (
-        (
-            await db.execute(
-                select(KbDocument)
-                .where(KbDocument.index_state == "pending")
-                .order_by(KbDocument.id)
-                .limit(limit)
-                .with_for_update(skip_locked=True)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for document in documents:
-        try:
-            await index_document(db, document, provider, settings)
-        except EmbeddingError as exc:
-            # Honest failure state: visible in the admin, retried manually.
-            document.index_state = "failed"
-            document.index_error = str(exc)[:300]
-            db.add(
-                KbProcessingLog(
-                    document_id=document.id,
-                    step="index",
-                    status="failed",
-                    detail=str(exc)[:300],
+    """Worker step: index queued documents, one transaction PER document.
+
+    One document = at most one paid embedding attempt per pass: ANY
+    failure (not just EmbeddingError) rolls back that document's own
+    transaction and marks it `failed` in a fresh one. A shared batch
+    transaction would abort on the first bad document and leave it
+    `pending`, making the worker re-pay for the same embeddings forever.
+    """
+    async with sessionmaker() as db:
+        ids = (
+            (
+                await db.execute(
+                    select(KbDocument.id)
+                    .where(KbDocument.index_state == "pending")
+                    .order_by(KbDocument.id)
+                    .limit(limit)
                 )
             )
-            logger.error("kb_index_failed", document_id=document.id, error=str(exc))
-    return len(documents)
+            .scalars()
+            .all()
+        )
+    handled = 0
+    for document_id in ids:
+        handled += await _index_one(sessionmaker, document_id, provider, settings)
+    return handled
+
+
+async def _index_one(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    document_id: int,
+    provider: EmbeddingProvider,
+    settings: Settings,
+) -> int:
+    try:
+        async with sessionmaker() as db:
+            document = (
+                await db.execute(
+                    select(KbDocument)
+                    .where(KbDocument.id == document_id, KbDocument.index_state == "pending")
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalar_one_or_none()
+            if document is None:
+                # Re-checked under lock: taken by a concurrent pass or no
+                # longer pending — nothing to do, nothing paid.
+                return 0
+            await index_document(db, document, provider, settings)
+            await db.commit()
+            return 1
+    except Exception as exc:  # noqa: BLE001 — every failure must end in `failed`
+        logger.exception("kb_index_failed", document_id=document_id)
+        await _mark_failed(sessionmaker, document_id, exc)
+        return 1
+
+
+async def _mark_failed(
+    sessionmaker: async_sessionmaker[AsyncSession], document_id: int, exc: Exception
+) -> None:
+    detail = (str(exc) or type(exc).__name__)[:300]
+    try:
+        async with sessionmaker() as db:
+            document = await db.get(KbDocument, document_id)
+            if document is None:
+                return
+            document.index_state = "failed"
+            document.index_error = detail
+            db.add(
+                KbProcessingLog(
+                    document_id=document_id,
+                    step="index",
+                    status="failed",
+                    detail=detail,
+                )
+            )
+            await db.commit()
+    except Exception:
+        # Marking failed itself failed (DB down mid-pass): the document
+        # stays pending and will be retried once the DB is back.
+        logger.exception("kb_index_mark_failed_error", document_id=document_id)

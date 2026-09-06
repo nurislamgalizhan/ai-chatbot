@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from redis.asyncio import Redis
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,8 +52,9 @@ from app.schemas.kb import (
     TranslationReviewItem,
     TranslationReviewResponse,
 )
+from app.security import rate_limit
 from app.security.audit import record_audit
-from app.security.deps import client_ip, get_app_settings, get_db, require_admin
+from app.security.deps import client_ip, get_app_settings, get_db, get_redis, require_admin
 from app.services.kb_faq import build_pattern, match_faq, missing_pattern_languages
 from app.services.kb_indexing import mark_for_indexing
 from app.services.kb_search import search_chunks
@@ -643,14 +645,30 @@ async def language_misses(
 # ------------------------- retrieval preview -------------------------
 
 
+# The preview embeds the query — a paid call. One admin account exists,
+# so the limit is per-endpoint, protecting the wallet against a runaway
+# tab or script, not enforcing per-user fairness.
+_SEARCH_RATE_LIMIT_PER_WINDOW = 30
+_SEARCH_RATE_WINDOW_SECONDS = 60
+
+
 @router.post("/search", response_model=SearchResponse)
 async def search_preview(
     body: SearchRequest,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)],
 ) -> SearchResponse:
     """Shows exactly what the pipeline would retrieve. Embeds the query
     (cheap) but never calls the chat model — SPEC invariant 16."""
+    allowed = await rate_limit.allow(
+        redis, "rl:kb:search", _SEARCH_RATE_LIMIT_PER_WINDOW, _SEARCH_RATE_WINDOW_SECONDS
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Слишком много запросов к поиску — подождите минуту",
+        )
     language = detect_language(body.query)
     faq = await match_faq(db, body.query, language)
     faq_miss = faq is None and await _pattern_exists(db, body.query)
