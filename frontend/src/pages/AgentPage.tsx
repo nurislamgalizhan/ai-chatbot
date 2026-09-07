@@ -16,6 +16,7 @@ const EFFORTS = ["none", "low", "medium", "high"];
 const TEMPLATE_KEYS: { key: string; label: string }[] = [
   { key: "handoff", label: "Передача менеджеру" },
   { key: "offtopic", label: "Не по теме / отказ" },
+  { key: "media", label: "Получен файл (документ/видео/голосовое)" },
 ];
 const LANGS: { code: string; label: string }[] = [
   { code: "ru", label: "RU" },
@@ -57,7 +58,11 @@ const PREFILL = `#РОЛЬ
 Не обещай «сам забронирую» — только «передал заявку менеджеру».`;
 
 function emptyTemplates(): FallbackTemplates {
-  return { handoff: { ru: "", kk: "", en: "" }, offtopic: { ru: "", kk: "", en: "" } };
+  return {
+    handoff: { ru: "", kk: "", en: "" },
+    offtopic: { ru: "", kk: "", en: "" },
+    media: { ru: "", kk: "", en: "" },
+  };
 }
 
 function templatesFrom(instruction: Instruction | null): FallbackTemplates {

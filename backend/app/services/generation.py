@@ -71,6 +71,15 @@ DEFAULT_TEMPLATES: dict[str, dict[str, str]] = {
         "kk": "Хабарлама тым ұзын. Сұрақты қысқаша жазыңызшы.",
         "en": "The message is too long. Please ask a shorter question.",
     },
+    # Sent for free (no model call) when a customer sends a document,
+    # video, GIF or voice/image the bot does not analyze yet (phase 7
+    # scope) — an acknowledgement instead of silence while it waits for
+    # a human. Used by worker/pipeline.py::_reply_media_received.
+    "media": {
+        "ru": "Спасибо, я передал(а) ваш файл менеджеру — он свяжется с вами в ближайшее время.",
+        "kk": "Рахмет, файлыңызды менеджерге жеткіздім — жақын арада сізбен хабарласады.",
+        "en": "Thank you, I've passed your file to a manager — they will contact you shortly.",
+    },
 }
 # Injection attempts and blocked-by-limit both answer with safe templates.
 _GUARDRAIL_TEMPLATE_KEYS = {"injection": "offtopic", "offtopic": "offtopic", "too_long": "too_long"}

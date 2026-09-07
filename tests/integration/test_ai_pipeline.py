@@ -369,6 +369,93 @@ async def test_media_is_handed_to_human(env) -> None:
     assert env["chat_provider"].requests == []
 
 
+async def test_media_gets_free_acknowledgement_reply(env) -> None:
+    """A document/video/voice the bot cannot analyze still hands off to a
+    human, but the customer is not left with silence: a template reply
+    goes out for free (no model call, no ai_calls row, no budget spend)."""
+    maker = env["maker"]
+    chat_id = await make_chat(maker, env["instance_pk"])
+    doc_id = await add_queued(maker, chat_id, "", media_type=MediaType.DOCUMENT)
+
+    await env["pipeline"].run_once()
+
+    message = await get_message(maker, doc_id)
+    assert message.state is MsgState.HANDED_TO_HUMAN
+    assert env["chat_provider"].requests == []  # free: no model call
+
+    reply = await get_reply(maker, chat_id)
+    assert reply is not None
+    assert reply.body == DEFAULT_TEMPLATES["media"]["ru"]
+    assert reply.source is MsgSource.AI
+
+    async with maker() as db:
+        chat = await db.get(Chat, chat_id)
+        outbox = (
+            await db.execute(
+                select(WaOutbox).where(WaOutbox.outbound_message_id == reply.outbound_message_id)
+            )
+        ).scalar_one()
+        calls = (await db.execute(select(AiCall))).scalars().all()
+    assert chat.needs_attention is True
+    assert chat.total_cost_usd == 0
+    assert outbox.body == DEFAULT_TEMPLATES["media"]["ru"]
+    assert calls == []  # no OpenAI call, nothing to account for
+
+
+async def test_media_acknowledgement_uses_owner_template_and_client_language(env) -> None:
+    """The owner's fallback_templates override wins, and the language is
+    the customer's — established earlier via chat_memory, not Russian by
+    default (owner's no-Russian-substitute policy applies here too)."""
+    maker = env["maker"]
+    chat_id = await make_chat(maker, env["instance_pk"])
+    async with maker() as db, db.begin():
+        db.add(ChatMemory(chat_id=chat_id, language="kk"))
+    async with maker() as db, db.begin():
+        instruction = await create_version(
+            db,
+            system_prompt="...",
+            style=None,
+            fallback_templates={"media": {"kk": "Файл менеджерге жіберілді, рахмет!"}},
+            escalation_rules=None,
+            max_output_tokens=None,
+            reasoning_effort=None,
+            author_user_id=None,
+        )
+        await activate_version(db, instruction, actor_user_id=None)
+
+    doc_id = await add_queued(maker, chat_id, "", media_type=MediaType.IMAGE)
+    await env["pipeline"].run_once()
+
+    assert (await get_message(maker, doc_id)).state is MsgState.HANDED_TO_HUMAN
+    reply = await get_reply(maker, chat_id)
+    assert reply is not None
+    assert reply.body == "Файл менеджерге жіберілді, рахмет!"
+
+
+@pytest.mark.parametrize(
+    ("mode", "emergency"),
+    [
+        (ChatMode.HUMAN, False),
+        (ChatMode.DISABLED, False),
+        (ChatMode.AUTO_AI, True),
+    ],
+)
+async def test_media_acknowledgement_respects_mode_gate(env, mode, emergency) -> None:
+    """The bot must not speak in a chat where it is not allowed to speak
+    at all — same ai_allowed gate as the text pipeline (недочёт №5)."""
+    maker = env["maker"]
+    if emergency:
+        async with maker() as db, db.begin():
+            await set_setting(db, app_settings.EMERGENCY_AI_OFF, True)
+    chat_id = await make_chat(maker, env["instance_pk"], mode=mode)
+    doc_id = await add_queued(maker, chat_id, "", media_type=MediaType.DOCUMENT)
+
+    await env["pipeline"].run_once()
+
+    assert (await get_message(maker, doc_id)).state is MsgState.HANDED_TO_HUMAN
+    assert await get_reply(maker, chat_id) is None  # silent: the bot may not speak here
+
+
 async def test_rate_limited_user_is_ignored_for_free(env) -> None:
     maker = env["maker"]
     async with maker() as db, db.begin():

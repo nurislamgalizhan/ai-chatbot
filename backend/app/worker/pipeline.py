@@ -37,11 +37,12 @@ from app.models.enums import (
 )
 from app.security import rate_limit
 from app.services import app_settings
+from app.services.agent import get_active_instruction
 from app.services.app_settings import get_setting
 from app.services.chat_memory import remember, snapshot
 from app.services.chat_modes import ai_allowed
 from app.services.chats import set_attention
-from app.services.generation import GenerationInput, generate_reply
+from app.services.generation import GenerationInput, generate_reply, pick_template
 from app.services.kb_text import detect_language, normalize_query
 from app.whatsapp.outbox import enqueue_text
 
@@ -204,18 +205,27 @@ class AiPipeline:
             if stale_found:
                 await set_attention(db, chat, AttentionReason.HANDOFF)
 
-            # 2. Media is a phase 7 feature — no stubs: hand it to a human.
+            # 2. Media is a phase 7 feature — no stubs: hand it to a
+            # human. A free templated reply (no model call, no budget
+            # reserve) tells the customer their file was received
+            # instead of leaving them with silence, but only when the
+            # bot may speak in this chat at all (same gate as step 3).
             text_messages: list[Message] = []
+            media_messages: list[Message] = []
             for message in fresh:
                 if message.media_type is not None:
                     message.state = MsgState.HANDED_TO_HUMAN
                     message.error_code = "media_unsupported"
-                    await set_attention(db, chat, AttentionReason.HANDOFF)
+                    media_messages.append(message)
                 elif not (message.body or "").strip():
                     message.state = MsgState.IGNORED
                     message.error_code = "empty"
                 else:
                     text_messages.append(message)
+            if media_messages:
+                await set_attention(db, chat, AttentionReason.HANDOFF)
+                if ai_allowed(chat, emergency_off=emergency_off):
+                    await self._reply_media_received(db, chat, media_messages)
             if not text_messages:
                 await db.commit()
                 return None
@@ -380,7 +390,9 @@ class AiPipeline:
 
             if outcome.text is not None:
                 # Invariant 3: GENERATED (with text) BEFORE any send.
-                reply_id = await self._insert_reply(db, claim, outcome.text)
+                reply_id = await self._insert_reply(
+                    db, claim.chat_id, claim.correlation_id, outcome.text
+                )
                 await enqueue_text(
                     db,
                     claim.instance_id,
@@ -457,17 +469,20 @@ class AiPipeline:
     def _max_retries(self) -> int:
         return self._deps.settings.retry_max_attempts
 
-    async def _insert_reply(self, db: AsyncSession, claim: _Claim, text: str) -> int | None:
+    async def _insert_reply(
+        self, db: AsyncSession, chat_id: int, correlation_id: str, text: str
+    ) -> int | None:
+        outbound_id = reply_outbound_id(correlation_id)
         stmt = (
             pg_insert(Message)
             .values(
-                chat_id=claim.chat_id,
+                chat_id=chat_id,
                 direction=MsgDirection.OUT,
                 source=MsgSource.AI,
-                outbound_message_id=reply_outbound_id(claim.correlation_id),
+                outbound_message_id=outbound_id,
                 body=text,
                 state=MsgState.GENERATED,
-                correlation_id=claim.correlation_id,
+                correlation_id=correlation_id,
             )
             .on_conflict_do_nothing(
                 index_elements=["outbound_message_id"],
@@ -479,13 +494,39 @@ class AiPipeline:
         if inserted is not None:
             return int(inserted)
         existing = (
-            await db.execute(
-                select(Message.id).where(
-                    Message.outbound_message_id == reply_outbound_id(claim.correlation_id)
-                )
-            )
+            await db.execute(select(Message.id).where(Message.outbound_message_id == outbound_id))
         ).scalar_one_or_none()
         return int(existing) if existing is not None else None
+
+    async def _reply_media_received(
+        self, db: AsyncSession, chat: Chat, media_messages: list[Message]
+    ) -> None:
+        """Free acknowledgement for a document/video/voice/etc. the bot
+        does not analyze (phase 7 scope): no model call, no budget
+        reserve — just a template in the customer's language so they are
+        not left with silence while a human reviews the file. Idempotent
+        via the same deterministic-outbound-id + ON CONFLICT DO NOTHING
+        pattern as a regular AI reply: a retry of this claim cannot
+        double-send it."""
+        captions = "\n".join((m.body or "").strip() for m in media_messages if m.body)
+        memory = await db.get(ChatMemory, chat.id)
+        if memory is not None and memory.language in ("ru", "kk", "en"):
+            language = KbLanguage(memory.language)
+        else:
+            language = detect_language(captions)
+        instruction = await get_active_instruction(db)
+        text = pick_template(instruction, "media", language)
+        correlation_id = f"chat:{chat.id}:media:{media_messages[-1].id}"
+        reply_id = await self._insert_reply(db, chat.id, correlation_id, text)
+        if reply_id is not None:
+            await enqueue_text(
+                db,
+                chat.instance_id,
+                chat.wa_chat_id,
+                text,
+                reply_outbound_id(correlation_id),
+                correlation_id,
+            )
 
     async def _notify_not_configured(self, db: AsyncSession, chat: Chat, error_code: str) -> None:
         throttle_key = "ai:event:not_configured"
