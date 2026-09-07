@@ -188,11 +188,14 @@ class AiPipeline:
 
             # 1. Stale cutoff (owner decision 2026-09-06: 1 hour): the bot
             # answering yesterday's message does more harm than silence.
+            # Measured from the CLIENT's send time (sent_at from the
+            # WhatsApp payload) — after a worker outage old notifications
+            # are ingested "now" and created_at would make them look fresh.
             cutoff = now - timedelta(minutes=max_age_minutes)
             fresh: list[Message] = []
             stale_found = False
             for message in messages:
-                if message.created_at < cutoff:
+                if (message.sent_at or message.created_at) < cutoff:
                     message.state = MsgState.IGNORED
                     message.error_code = "stale"
                     stale_found = True

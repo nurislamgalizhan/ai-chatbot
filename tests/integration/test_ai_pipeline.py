@@ -160,6 +160,7 @@ async def add_queued(
     text: str = QUESTION,
     *,
     age_minutes: int = 0,
+    sent_age_minutes: int | None = None,
     media_type: MediaType | None = None,
     state: MsgState = MsgState.QUEUED,
 ) -> int:
@@ -173,6 +174,11 @@ async def add_queued(
             media_type=media_type,
             state=state,
             created_at=datetime.now(UTC) - timedelta(minutes=age_minutes),
+            sent_at=(
+                datetime.now(UTC) - timedelta(minutes=sent_age_minutes)
+                if sent_age_minutes is not None
+                else None
+            ),
         )
         db.add(message)
         await db.flush()
@@ -326,6 +332,28 @@ async def test_stale_messages_are_ignored_with_attention(env) -> None:
     assert chat.needs_attention
     assert chat.attention_reason is AttentionReason.HANDOFF
     assert env["chat_provider"].requests == []
+
+
+async def test_stale_by_client_send_time_after_worker_outage(env) -> None:
+    """The outage scenario: the worker was down, GREEN-API queued the
+    notifications, and on recovery they are ingested with a FRESH
+    created_at. Staleness must follow the client's send time (sent_at),
+    or the bot would answer hours-old messages after every outage."""
+    maker = env["maker"]
+    chat_id = await make_chat(maker, env["instance_pk"])
+    old_id = await add_queued(
+        maker, chat_id, "вопрос до сбоя", age_minutes=0, sent_age_minutes=180
+    )
+    fresh_id = await add_queued(maker, chat_id, QUESTION, sent_age_minutes=5)
+
+    await env["pipeline"].run_once()
+
+    old = await get_message(maker, old_id)
+    assert old.state is MsgState.IGNORED
+    assert old.error_code == "stale"
+    # The genuinely fresh message from the same chat is still answered.
+    assert (await get_message(maker, fresh_id)).state is MsgState.ANSWERED
+    assert len(env["chat_provider"].requests) == 1
 
 
 async def test_media_is_handed_to_human(env) -> None:
