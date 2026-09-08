@@ -37,6 +37,7 @@ TEST_PASSWORD = "correct-horse-battery-staple"
 TEST_PHONE = "+77010000001"
 
 APP_TABLES = (
+    "media_jobs",
     "alert_notifications",
     "semantic_cache",
     "budget_reservations",

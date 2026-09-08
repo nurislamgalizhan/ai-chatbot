@@ -55,6 +55,27 @@ SEMANTIC_CACHE_TTL_HOURS = "semantic_cache_ttl_hours"
 # the cache key, so bumping invalidates the whole cache without a scan.
 KB_VERSION = "kb_version"
 
+# --- phase 7 keys: media (SPEC §13, §9.3) ---
+# Voice: both caps are checked BEFORE the paid transcription — the file
+# size before downloading, the duration locally after (mutagen).
+MAX_AUDIO_SECONDS = "max_audio_seconds"
+MAX_AUDIO_FILE_MB = "max_audio_file_mb"
+# Images: per-dialog cap stops a picture flood from draining the budget;
+# the file cap is checked before Pillow ever decodes the bytes.
+MAX_IMAGES_PER_DIALOG = "max_images_per_dialog"
+MAX_IMAGE_FILE_MB = "max_image_file_mb"
+# Files are deleted after this many days; transcripts and image
+# descriptions stay forever (SPEC §13 retention).
+MEDIA_RETENTION_DAYS = "media_retention_days"
+# Kill switches: with either off, that media type is handed to a human
+# instead of costing money.
+TRANSCRIPTION_ENABLED = "transcription_enabled"
+VISION_ENABLED = "vision_enabled"
+# Domain terms passed to the transcription model so it spells the org
+# name, section and place names correctly. White-label: owner-supplied,
+# nothing company-specific in code.
+TRANSCRIPTION_TERMS = "transcription_terms"
+
 DEFAULTS: dict[str, Any] = {
     EMERGENCY_AI_OFF: False,
     PANEL_REPLY_MODE: "PAUSED_UNTIL",
@@ -81,6 +102,19 @@ DEFAULTS: dict[str, Any] = {
     SEMANTIC_CACHE_ENABLED: False,
     SEMANTIC_CACHE_TTL_HOURS: 24,
     KB_VERSION: 0,
+    MAX_AUDIO_SECONDS: 120,
+    MAX_AUDIO_FILE_MB: 16,
+    MAX_IMAGES_PER_DIALOG: 3,
+    MAX_IMAGE_FILE_MB: 10,
+    MEDIA_RETENTION_DAYS: 7,
+    TRANSCRIPTION_ENABLED: True,
+    # OFF by default, deliberately. Voice notes are the customer's actual
+    # question; photos are where the risk is: an unlabelled photo of a
+    # passport or bank card cannot be recognized as sensitive without
+    # sending it somewhere, and SPEC §13 forbids exactly that. The owner
+    # turns it on knowingly in «Лимиты» → «Медиа».
+    VISION_ENABLED: False,
+    TRANSCRIPTION_TERMS: "",
 }
 
 

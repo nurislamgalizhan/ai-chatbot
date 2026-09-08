@@ -364,6 +364,77 @@ export default function LimitsPage() {
         </div>
       </section>
 
+      <section className="card">
+        <h2>Медиа</h2>
+        <label className="limit-field checkbox">
+          <input
+            type="checkbox"
+            checked={form.transcription_enabled}
+            onChange={(e) => update({ transcription_enabled: e.target.checked })}
+          />
+          <span>
+            Распознавать голосовые сообщения (платно, по минутам аудио).
+            Выключено — голосовые уходят менеджеру
+          </span>
+        </label>
+        <label className="limit-field checkbox">
+          <input
+            type="checkbox"
+            checked={form.vision_enabled}
+            onChange={(e) => update({ vision_enabled: e.target.checked })}
+          />
+          <span>
+            Распознавать фотографии (по умолчанию выключено). Фото с
+            документами, картами и медицинскими снимками не отправляются в
+            модель никогда, но фото без подписи распознать как документ
+            невозможно — включайте осознанно
+          </span>
+        </label>
+        <div className="limits-grid">
+          <NumberField
+            label="Макс. длина голосового, сек"
+            value={form.max_audio_seconds}
+            onChange={(v) => update({ max_audio_seconds: v })}
+          />
+          <NumberField
+            label="Макс. размер аудио, МБ"
+            value={form.max_audio_file_mb}
+            onChange={(v) => update({ max_audio_file_mb: v })}
+          />
+          <NumberField
+            label="Фото на диалог"
+            value={form.max_images_per_dialog}
+            onChange={(v) => update({ max_images_per_dialog: v })}
+          />
+          <NumberField
+            label="Макс. размер фото, МБ"
+            value={form.max_image_file_mb}
+            onChange={(v) => update({ max_image_file_mb: v })}
+          />
+          <NumberField
+            label="Хранить файлы, дней"
+            value={form.media_retention_days}
+            onChange={(v) => update({ media_retention_days: v })}
+          />
+          <label className="limit-field">
+            <span>Термины для распознавания речи</span>
+            <input
+              value={form.transcription_terms}
+              onChange={(e) => update({ transcription_terms: e.target.value })}
+              placeholder="название центра, секции, улица"
+            />
+            <span className="muted">
+              подсказка модели, чтобы правильно писала названия
+            </span>
+          </label>
+        </div>
+        <p className="muted">
+          Документы, видео и GIF не читаются никогда — клиент получает шаблон, а
+          чат помечается «требует внимания». Тексты распознавания остаются в
+          истории после удаления самих файлов.
+        </p>
+      </section>
+
       {notice && <div className="plaque warn">{notice}</div>}
       {saveError && <div className="error">{saveError}</div>}
       <div className="actions-row">

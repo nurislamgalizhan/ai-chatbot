@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -51,6 +51,19 @@ class ChatRequest:
 
 
 @dataclass(frozen=True)
+class VisionRequest:
+    """One image + one instruction, kept apart from ChatRequest on
+    purpose: the chat path's system prefix must stay byte-stable for
+    prompt caching, and an image must never slip into it."""
+
+    system: str
+    instruction: str
+    image_data_url: str  # data:image/jpeg;base64,...
+    model: str
+    max_output_tokens: int
+
+
+@dataclass(frozen=True)
 class ChatResult:
     text: str
     usage: ChatUsage
@@ -61,6 +74,12 @@ class ChatResult:
 class ChatProvider(ABC):
     @abstractmethod
     async def complete(self, request: ChatRequest) -> ChatResult: ...
+
+    async def describe_image(self, request: VisionRequest) -> ChatResult:
+        """Optional capability; a provider without it says so and the
+        pipeline hands the image to a human instead of faking a caption."""
+        msg = "vision_not_supported"
+        raise ChatError(msg, retryable=False)
 
     async def aclose(self) -> None:  # pragma: no cover - default no-op
         return
@@ -79,18 +98,55 @@ class OpenAIChatProvider(ChatProvider):
         )
 
     async def complete(self, request: ChatRequest) -> ChatResult:
+        return await self._invoke(
+            model=request.model,
+            messages=[
+                {"role": "system", "content": request.system},
+                *request.messages,
+            ],
+            max_output_tokens=request.max_output_tokens,
+            reasoning_effort=request.reasoning_effort,
+        )
+
+    async def describe_image(self, request: VisionRequest) -> ChatResult:
+        """Vision runs on the same chat model, so it is billed with the
+        same token prices — the image simply arrives as input tokens."""
+        return await self._invoke(
+            model=request.model,
+            messages=[
+                {"role": "system", "content": request.system},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": request.instruction},
+                        {"type": "image_url", "image_url": {"url": request.image_data_url}},
+                    ],
+                },
+            ],
+            max_output_tokens=request.max_output_tokens,
+            reasoning_effort=None,  # a caption needs no reasoning budget
+        )
+
+    async def _invoke(
+        self,
+        *,
+        model: str,
+        messages: list[Any],
+        max_output_tokens: int,
+        reasoning_effort: str | None,
+    ) -> ChatResult:
         import openai  # noqa: PLC0415
 
         started = time.monotonic()
+        extra: dict[str, Any] = {}
+        if reasoning_effort is not None:
+            extra["reasoning_effort"] = reasoning_effort
         try:
-            response = await self._client.chat.completions.create(  # type: ignore[call-overload]
-                model=request.model,
-                messages=[
-                    {"role": "system", "content": request.system},
-                    *request.messages,
-                ],
-                max_completion_tokens=request.max_output_tokens,
-                reasoning_effort=request.reasoning_effort,
+            response = await self._client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_completion_tokens=max_output_tokens,
+                **extra,
             )
         except openai.APIStatusError as exc:
             retryable = exc.status_code in _RETRYABLE_STATUSES
@@ -123,7 +179,7 @@ class OpenAIChatProvider(ChatProvider):
                 output_tokens=getattr(usage, "completion_tokens", 0) or 0,
                 reasoning_tokens=getattr(completion_details, "reasoning_tokens", 0) or 0,
             ),
-            model=response.model or request.model,
+            model=response.model or model,
             latency_ms=latency_ms,
         )
 
@@ -138,6 +194,10 @@ class FakeChatProvider(ChatProvider):
 
     script: list[ChatResult | ChatError] = field(default_factory=list)
     requests: list[ChatRequest] = field(default_factory=list)
+    # Vision is scripted separately so a test can prove an image never
+    # reached the model (empty list = the call was never made).
+    vision_script: list[ChatResult | ChatError] = field(default_factory=list)
+    vision_requests: list[VisionRequest] = field(default_factory=list)
 
     async def complete(self, request: ChatRequest) -> ChatResult:
         self.requests.append(request)
@@ -145,6 +205,16 @@ class FakeChatProvider(ChatProvider):
             msg = "chat_failed:fake_script_exhausted"
             raise ChatError(msg, retryable=False)
         item = self.script.pop(0)
+        if isinstance(item, ChatError):
+            raise item
+        return item
+
+    async def describe_image(self, request: VisionRequest) -> ChatResult:
+        self.vision_requests.append(request)
+        if not self.vision_script:
+            msg = "chat_failed:fake_vision_script_exhausted"
+            raise ChatError(msg, retryable=False)
+        item = self.vision_script.pop(0)
         if isinstance(item, ChatError):
             raise item
         return item

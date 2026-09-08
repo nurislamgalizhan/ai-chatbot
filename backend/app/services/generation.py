@@ -71,14 +71,48 @@ DEFAULT_TEMPLATES: dict[str, dict[str, str]] = {
         "kk": "Хабарлама тым ұзын. Сұрақты қысқаша жазыңызшы.",
         "en": "The message is too long. Please ask a shorter question.",
     },
-    # Sent for free (no model call) when a customer sends a document,
-    # video, GIF or voice/image the bot does not analyze yet (phase 7
-    # scope) — an acknowledgement instead of silence while it waits for
-    # a human. Used by worker/pipeline.py::_reply_media_received.
+    # Sent for free (no model call) when a customer sends a file the bot
+    # does not analyze — a document, video or GIF, a photo while vision
+    # is off, or anything that failed pre-processing. An acknowledgement
+    # instead of silence while it waits for a human.
     "media": {
         "ru": "Спасибо, я передал(а) ваш файл менеджеру — он свяжется с вами в ближайшее время.",
         "kk": "Рахмет, файлыңызды менеджерге жеткіздім — жақын арада сізбен хабарласады.",
         "en": "Thank you, I've passed your file to a manager — they will contact you shortly.",
+    },
+    # A voice message past the duration limit. Deliberately WITHOUT a
+    # number: max_audio_seconds is a setting, and a hardcoded "two
+    # minutes" would start lying the moment the owner changes it.
+    "audio_too_long": {
+        "ru": (
+            "Голосовое сообщение слишком длинное. Пожалуйста, отправьте короче "
+            "или напишите вопрос текстом — при необходимости передам его администратору."
+        ),
+        "kk": (
+            "Дауыстық хабарлама тым ұзын. Қысқарақ жіберіңіз немесе сұрағыңызды "
+            "мәтінмен жазыңыз — қажет болса әкімшіге жеткізем."
+        ),
+        "en": (
+            "That voice message is too long. Please send a shorter one or type your "
+            "question — I'll pass it to an administrator if needed."
+        ),
+    },
+    # A photo the local filter treats as sensitive (an ID, a card, a
+    # medical or legal document). It is NEVER sent to the model; the
+    # wording avoids accusing the customer of anything.
+    "media_sensitive": {
+        "ru": (
+            "Такие документы я не обрабатываю автоматически — передал(а) обращение "
+            "менеджеру, он свяжется с вами."
+        ),
+        "kk": (
+            "Мұндай құжаттарды автоматты өңдемеймін — өтінішіңізді менеджерге "
+            "жеткіздім, ол сізбен хабарласады."
+        ),
+        "en": (
+            "I don't process documents like this automatically — I've passed your "
+            "message to a manager, who will contact you."
+        ),
     },
 }
 # Injection attempts and blocked-by-limit both answer with safe templates.

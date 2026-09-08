@@ -103,6 +103,22 @@ class CallType(StrEnum):
     VISION = "vision"
 
 
+class MediaJobState(StrEnum):
+    """Lifecycle of one media file's pre-processing (phase 7).
+
+    Kept apart from msg_state: a job can fail without the MESSAGE being
+    a failure — it just becomes a human's problem instead.
+    """
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    DONE = "done"
+    # Deliberately not analyzed: sensitive content, a limit, a kill
+    # switch. Terminal and free.
+    REFUSED = "refused"
+    FAILED = "failed"
+
+
 class BudgetScope(StrEnum):
     GLOBAL_DAY = "global_day"
     GLOBAL_MONTH = "global_month"

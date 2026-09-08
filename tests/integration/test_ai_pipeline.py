@@ -19,6 +19,7 @@ from app.models import (
     ChatMemory,
     KbDocument,
     KbFaq,
+    MediaJob,
     Message,
     SystemEvent,
     WaOutbox,
@@ -32,6 +33,7 @@ from app.models.enums import (
     ChatMode,
     DocStatus,
     KbLanguage,
+    MediaJobState,
     MediaType,
     MsgDirection,
     MsgSource,
@@ -49,6 +51,7 @@ from app.worker.pipeline import AiPipeline, reply_outbound_id
 from fakeredis.aioredis import FakeRedis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from tests.integration.test_kb_rag import ScriptedEmbeddings, unit_vector
 
 QUESTION = "сколько стоит абонемент в зал"
@@ -83,7 +86,9 @@ async def env(db_engine, settings, instance_pk):
 
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
-        db.add(FxRate(pair="USD/KZT", rate=Decimal("500"), effective_from=datetime.now(UTC)))
+        db.add(
+            FxRate(pair="USD/KZT", rate=Decimal(500), effective_from=datetime.now(UTC))
+        )
         await seed_default_prices(db, settings)
         await set_setting(db, app_settings.DEBOUNCE_SECONDS, 0)
         instruction = await create_version(
@@ -236,9 +241,7 @@ async def test_happy_path_full_bookkeeping(env) -> None:
             )
         ).scalar_one()
         chat = await db.get(Chat, chat_id)
-        calls = (
-            (await db.execute(select(AiCall).order_by(AiCall.id))).scalars().all()
-        )
+        calls = (await db.execute(select(AiCall).order_by(AiCall.id))).scalars().all()
         day = (
             await db.execute(
                 select(BudgetLedger).where(BudgetLedger.scope == BudgetScope.GLOBAL_DAY)
@@ -267,7 +270,9 @@ async def test_happy_path_full_bookkeeping(env) -> None:
 async def test_debounce_merges_batch_into_one_call(env) -> None:
     maker = env["maker"]
     # The merged question is what gets embedded — script its vector too.
-    env["deps"].embedding_provider.mapping[f"Здравствуйте!\n{QUESTION}"] = unit_vector(0.0)
+    env["deps"].embedding_provider.mapping[f"Здравствуйте!\n{QUESTION}"] = unit_vector(
+        0.0
+    )
     chat_id = await make_chat(maker, env["instance_pk"])
     first = await add_queued(maker, chat_id, "Здравствуйте!")
     second = await add_queued(maker, chat_id, QUESTION)
@@ -392,7 +397,9 @@ async def test_media_gets_free_acknowledgement_reply(env) -> None:
         chat = await db.get(Chat, chat_id)
         outbox = (
             await db.execute(
-                select(WaOutbox).where(WaOutbox.outbound_message_id == reply.outbound_message_id)
+                select(WaOutbox).where(
+                    WaOutbox.outbound_message_id == reply.outbound_message_id
+                )
             )
         ).scalar_one()
         calls = (await db.execute(select(AiCall))).scalars().all()
@@ -402,7 +409,9 @@ async def test_media_gets_free_acknowledgement_reply(env) -> None:
     assert calls == []  # no OpenAI call, nothing to account for
 
 
-async def test_media_acknowledgement_uses_owner_template_and_client_language(env) -> None:
+async def test_media_acknowledgement_uses_owner_template_and_client_language(
+    env,
+) -> None:
     """The owner's fallback_templates override wins, and the language is
     the customer's — established earlier via chat_memory, not Russian by
     default (owner's no-Russian-substitute policy applies here too)."""
@@ -621,7 +630,9 @@ async def test_retryable_error_requeues_then_succeeds(env) -> None:
             )
         ).scalar_one()
         error_calls = (
-            (await db.execute(select(AiCall).where(AiCall.status == "error"))).scalars().all()
+            (await db.execute(select(AiCall).where(AiCall.status == "error")))
+            .scalars()
+            .all()
         )
     assert day.reserved_usd == 0
     assert day.spent_usd == Decimal("0.00026000")  # booked once, not twice
@@ -671,7 +682,9 @@ async def test_circuit_breaker_opens_and_holds_messages(env) -> None:
         events = (
             (
                 await db.execute(
-                    select(SystemEvent).where(SystemEvent.event == "circuit_breaker_opened")
+                    select(SystemEvent).where(
+                        SystemEvent.event == "circuit_breaker_opened"
+                    )
                 )
             )
             .scalars()
@@ -779,7 +792,9 @@ async def test_sweeper_finishes_orphan_with_existing_reply(env) -> None:
         message = await db.get(Message, msg_id)
         message.state = MsgState.PROCESSING
         message.correlation_id = correlation
-        message.next_attempt_at = datetime.now(UTC) - timedelta(minutes=1)  # lease expired
+        message.next_attempt_at = datetime.now(UTC) - timedelta(
+            minutes=1
+        )  # lease expired
         db.add(
             Message(
                 chat_id=chat_id,
@@ -823,3 +838,89 @@ async def test_sweeper_requeues_orphan_without_reply(env) -> None:
     message = await get_message(maker, msg_id)
     assert message.state is MsgState.QUEUED
     assert message.retry_count == 1
+
+
+# --------------------------- media integration ---------------------------
+
+
+async def test_transcribed_voice_is_answered_like_text(env) -> None:
+    """Phase 7 seam: the media processor writes `transcript`, and the AI
+    pipeline answers it exactly as if the customer had typed it."""
+    maker = env["maker"]
+    env["deps"].embedding_provider.mapping[QUESTION] = unit_vector(0.0)
+    chat_id = await make_chat(maker, env["instance_pk"])
+    voice_id = await add_queued(maker, chat_id, "", media_type=MediaType.VOICE)
+    async with maker() as db, db.begin():
+        message = await db.get(Message, voice_id)
+        message.transcript = QUESTION  # what transcription produced
+
+    assert await env["pipeline"].run_once() == 1
+
+    assert (await get_message(maker, voice_id)).state is MsgState.ANSWERED
+    assert len(env["chat_provider"].requests) == 1
+    asked = env["chat_provider"].requests[0].messages[-1]["content"]
+    assert QUESTION in asked  # the spoken words reached the model
+    reply = await get_reply(maker, chat_id)
+    assert reply is not None and reply.body == ANSWER
+
+
+async def test_chat_waiting_on_media_is_not_answered_out_of_order(env) -> None:
+    """A voice note still being transcribed holds the whole chat back:
+    answering the text first would reply out of order — and re-picking a
+    chat we cannot finish would spin the worker loop at 100% CPU."""
+    maker = env["maker"]
+    chat_id = await make_chat(maker, env["instance_pk"])
+    voice_id = await add_queued(maker, chat_id, "", media_type=MediaType.VOICE)
+    text_id = await add_queued(maker, chat_id, QUESTION)
+    async with maker() as db, db.begin():
+        db.add(
+            MediaJob(
+                message_id=voice_id,
+                chat_id=chat_id,
+                media_type=MediaType.VOICE,
+                state=MediaJobState.PENDING,
+            )
+        )
+
+    # Nothing is claimed and nothing is spent while media is pending.
+    assert await env["pipeline"].run_once() == 0
+    assert env["chat_provider"].requests == []
+    assert (await get_message(maker, text_id)).state is MsgState.QUEUED
+
+    # Once the transcript lands and the job closes, both are answered
+    # together in one reply.
+    async with maker() as db, db.begin():
+        message = await db.get(Message, voice_id)
+        message.transcript = "Здравствуйте"
+        job = (
+            await db.execute(select(MediaJob).where(MediaJob.message_id == voice_id))
+        ).scalar_one()
+        job.state = MediaJobState.DONE
+    env["deps"].embedding_provider.mapping[f"Здравствуйте\n{QUESTION}"] = unit_vector(
+        0.0
+    )
+
+    assert await env["pipeline"].run_once() == 1
+    assert len(env["chat_provider"].requests) == 1
+    for message_id in (voice_id, text_id):
+        assert (await get_message(maker, message_id)).state is MsgState.ANSWERED
+
+
+async def test_image_description_is_reused_from_history(env) -> None:
+    """SPEC §13: the saved description is what later turns use — the
+    picture is never sent to the model twice."""
+    maker = env["maker"]
+    chat_id = await make_chat(maker, env["instance_pk"])
+    photo_id = await add_queued(maker, chat_id, "", media_type=MediaType.IMAGE)
+    async with maker() as db, db.begin():
+        message = await db.get(Message, photo_id)
+        message.transcript = "На фото прайс-лист тренажерного зала."
+        message.state = MsgState.ANSWERED  # already handled earlier
+    follow_up = await add_queued(maker, chat_id, QUESTION)
+
+    await env["pipeline"].run_once()
+
+    assert (await get_message(maker, follow_up)).state is MsgState.ANSWERED
+    history = env["chat_provider"].requests[0].messages
+    joined = " ".join(str(m.get("content", "")) for m in history)
+    assert "прайс-лист тренажерного зала" in joined

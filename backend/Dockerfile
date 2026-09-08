@@ -30,6 +30,12 @@ RUN mkdir -p /srv/tiktoken-cache \
     && python -c "import tiktoken; tiktoken.get_encoding('o200k_base')" \
     && chown -R root:root /srv/tiktoken-cache && chmod -R a+rX /srv/tiktoken-cache
 
+# The media volume's mount point is created HERE, owned by the app user:
+# Docker copies the image's ownership onto a fresh named volume, so
+# without this the worker would hit EACCES on the very first download
+# (a new volume is root:root 0755, and the process runs as uid 10001).
+RUN mkdir -p /data/media && chown -R app:app /data && chmod 700 /data/media
+
 USER app
 
 # Default command: API. The worker overrides this in compose.

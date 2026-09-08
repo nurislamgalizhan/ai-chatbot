@@ -13,17 +13,27 @@ from typing import TYPE_CHECKING
 
 import structlog
 from redis.asyncio import Redis
+from sqlalchemy import select
 
 from app.ai.chat_provider import ChatError, ChatProvider, OpenAIChatProvider
 from app.ai.embeddings import EmbeddingError, EmbeddingProvider, OpenAIEmbeddingProvider
+from app.ai.transcription import (
+    OpenAITranscriptionProvider,
+    TranscriptionProvider,
+)
 from app.config import get_settings
 from app.db.engine import build_engine, build_sessionmaker
+from app.media import storage
+from app.models import Message
 from app.observability.logging import configure_logging
+from app.services import app_settings
+from app.services.app_settings import get_setting
 from app.services.budget import sweep_stale_holds
 from app.services.chat_modes import resume_expired_pauses
 from app.services.generation import GenerationDeps
 from app.services.inbox_processing import process_inbound_batch, reconcile_outbox
 from app.services.kb_indexing import process_pending_documents
+from app.services.media_processing import MediaDeps, MediaProcessor
 from app.whatsapp.green_api import GreenApiProvider
 from app.whatsapp.outbox import OutboxFlusher
 from app.whatsapp.provider import ProviderError
@@ -50,6 +60,11 @@ _KB_INDEXING_IDLE_SECONDS = 5.0
 _PIPELINE_IDLE_SECONDS = 1.0
 _RECOVERY_INTERVAL_SECONDS = 60.0
 _STALE_HOLD_MINUTES = 15
+_MEDIA_IDLE_SECONDS = 2.0
+# Retention runs hourly: files live for days, so a tighter schedule
+# would only add disk churn on a shared VPS.
+_MEDIA_RETENTION_INTERVAL_SECONDS = 3600.0
+_MEDIA_RETENTION_BATCH = 200
 
 
 async def _heartbeat_loop(redis: Redis, stop: asyncio.Event) -> None:
@@ -212,6 +227,64 @@ async def _recovery_loop(
         await _wait(stop, _RECOVERY_INTERVAL_SECONDS)
 
 
+async def _media_loop(processor: MediaProcessor, stop: asyncio.Event) -> None:
+    """Voice/image pre-processing (phase 7). Runs ahead of the AI
+    pipeline, which waits for a chat's media before answering it."""
+    while not stop.is_set():
+        handled = 0
+        try:
+            handled = await processor.run_once()
+        except Exception:
+            logger.exception("media_loop_error")
+        if handled == 0:
+            await _wait(stop, _MEDIA_IDLE_SECONDS)
+
+
+async def _media_retention_loop(
+    settings: Settings, sessionmaker: async_sessionmaker[AsyncSession], stop: asyncio.Event
+) -> None:
+    """Delete media files past the retention window; transcripts and
+    image descriptions stay forever (SPEC §13).
+
+    Two passes: the DB-driven one nulls media_ref for rows it clears, and
+    a filesystem sweep removes files whose row never committed (a crash
+    between writing bytes and the commit would otherwise leak them onto a
+    124 GB volume shared with the owner's other projects).
+    """
+    while not stop.is_set():
+        try:
+            async with sessionmaker() as db:
+                days = int(await get_setting(db, app_settings.MEDIA_RETENTION_DAYS))
+                cutoff = datetime.now(UTC) - timedelta(days=days)
+                rows = (
+                    (
+                        await db.execute(
+                            select(Message)
+                            .where(
+                                Message.media_ref.is_not(None),
+                                Message.created_at < cutoff,
+                            )
+                            .limit(_MEDIA_RETENTION_BATCH)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for message in rows:
+                    if message.media_ref:
+                        await asyncio.to_thread(
+                            storage.delete_ref, settings.media_dir, message.media_ref
+                        )
+                        message.media_ref = None
+                await db.commit()
+            orphans = await asyncio.to_thread(storage.sweep_orphans, settings.media_dir, days)
+            if rows or orphans:
+                logger.info("media_retention_run", rows=len(rows), orphan_files=orphans)
+        except Exception:
+            logger.exception("media_retention_error")
+        await _wait(stop, _MEDIA_RETENTION_INTERVAL_SECONDS)
+
+
 async def _wait(stop: asyncio.Event, seconds: float) -> None:
     try:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
@@ -219,7 +292,7 @@ async def _wait(stop: asyncio.Event, seconds: float) -> None:
         return
 
 
-async def run() -> None:
+async def run() -> None:  # noqa: PLR0915 - one wiring block per loop; splitting it hides the process layout
     settings = get_settings()
     configure_logging(settings)
     redis = Redis.from_url(settings.redis_url)
@@ -251,6 +324,13 @@ async def run() -> None:
             instance_pk = await ensure_instance_registered(db, settings)
             await db.commit()
 
+    transcription_provider: TranscriptionProvider | None = None
+    if settings.openai_api_key:
+        try:
+            transcription_provider = OpenAITranscriptionProvider(settings)
+        except ChatError:
+            logger.exception("transcription_provider_init_failed")
+
     pipeline = AiPipeline(
         GenerationDeps(
             sessionmaker=sessionmaker,
@@ -258,6 +338,16 @@ async def run() -> None:
             redis=redis,
             chat_provider=chat_provider,
             embedding_provider=embedding_provider,
+        )
+    )
+    media_processor = MediaProcessor(
+        MediaDeps(
+            sessionmaker=sessionmaker,
+            settings=settings,
+            redis=redis,
+            provider=provider,
+            chat_provider=chat_provider,
+            transcription_provider=transcription_provider,
         )
     )
 
@@ -268,6 +358,7 @@ async def run() -> None:
         transport_configured=provider is not None,
         embeddings_configured=embedding_provider is not None,
         chat_configured=chat_provider is not None,
+        transcription_configured=transcription_provider is not None,
     )
     try:
         async with asyncio.TaskGroup() as group:
@@ -279,6 +370,8 @@ async def run() -> None:
             group.create_task(_kb_indexing_loop(settings, sessionmaker, embedding_provider, stop))
             group.create_task(_pipeline_loop(pipeline, stop))
             group.create_task(_recovery_loop(pipeline, sessionmaker, stop))
+            group.create_task(_media_loop(media_processor, stop))
+            group.create_task(_media_retention_loop(settings, sessionmaker, stop))
     finally:
         if provider is not None:
             await provider.aclose()
@@ -286,6 +379,8 @@ async def run() -> None:
             await embedding_provider.aclose()
         if chat_provider is not None:
             await chat_provider.aclose()
+        if transcription_provider is not None:
+            await transcription_provider.aclose()
         await redis.aclose()
         await engine.dispose()
         logger.info("worker_stopped")

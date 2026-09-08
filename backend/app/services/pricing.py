@@ -85,6 +85,38 @@ async def load_price_sheet(db: AsyncSession, model: str, at: datetime | None = N
     )
 
 
+async def load_audio_price_usd(db: AsyncSession, model: str, at: datetime | None = None) -> Decimal:
+    """USD per MINUTE of audio for the transcription model.
+
+    Fails closed like the token prices: without a price, transcription
+    does not happen at all rather than running unpriced.
+    """
+    moment = at or datetime.now(UTC)
+    price = (
+        await db.execute(
+            select(ModelPrice.price_usd)
+            .where(
+                ModelPrice.model == model,
+                ModelPrice.unit == PriceUnit.PER_MINUTE_AUDIO,
+                ModelPrice.effective_from <= moment,
+            )
+            .order_by(ModelPrice.effective_from.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if price is None:
+        msg = f"no per-minute audio price for model {model!r} (set it in Лимиты)"
+        raise PricingError(msg)
+    return price
+
+
+def compute_audio_cost_usd(price_per_minute: Decimal, seconds: float) -> Decimal:
+    """Billed by duration, so seconds are converted, not rounded up to a
+    whole minute — a 12-second voice message costs 12 seconds."""
+    minutes = Decimal(str(max(seconds, 0.0))) / Decimal(60)
+    return (price_per_minute * minutes).quantize(_USD_PLACES)
+
+
 async def load_usd_kzt_rate(db: AsyncSession, at: datetime | None = None) -> Decimal:
     """Owner-entered rate effective at the moment; PricingError if unset."""
     moment = at or datetime.now(UTC)

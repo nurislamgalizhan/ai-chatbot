@@ -89,6 +89,10 @@ services:
     cap_drop: [ALL]
     read_only: true
     tmpfs: [/tmp]
+    # Read-only: the API only serves stored media to the panel; writing
+    # is the worker's job (phase 7).
+    volumes:
+      - wabot_media:/data/media:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -114,12 +118,18 @@ services:
     environment: *app-env
     networks: [internal]
     restart: unless-stopped
-    mem_limit: 384m
+    # 512m (was 384m): decoding a customer photo with Pillow needs
+    # headroom, and an OOM-kill here would take polling, the outbox and
+    # the AI pipeline down with it (one process). Total stays inside the
+    # ~1.5 GiB envelope of SPEC §16 — see docs/deployment.md.
+    mem_limit: 512m
     cpus: 0.75
     security_opt: [no-new-privileges=true]
     cap_drop: [ALL]
     read_only: true
     tmpfs: [/tmp]
+    volumes:
+      - wabot_media:/data/media
     depends_on:
       postgres:
         condition: service_healthy
@@ -164,3 +174,6 @@ networks:
 
 volumes:
   pgdata:
+  # Customer media (voice, photos). Auto-cleaned by the retention
+  # scheduler; transcripts and descriptions stay in the database.
+  wabot_media:

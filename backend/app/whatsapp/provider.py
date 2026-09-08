@@ -67,6 +67,16 @@ class WhatsAppProvider(ABC):
     async def set_typing(self, chat_id: str) -> None:
         raise UnsupportedOperationError("set_typing")
 
+    async def download_file(self, url: str, max_bytes: int) -> bytes:
+        """Fetch incoming media, refusing anything over max_bytes.
+
+        The cap must be enforced WHILE streaming, not after: a provider
+        (or anything impersonating one) could otherwise stream gigabytes
+        into a 3.8 GiB VPS. Optional capability — a provider without it
+        makes the pipeline hand media to a human.
+        """
+        raise UnsupportedOperationError("download_file")
+
     @abstractmethod
     async def get_instance_state(self) -> str:
         """Provider-reported instance state, e.g. "authorized"."""

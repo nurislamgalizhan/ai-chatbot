@@ -158,6 +158,40 @@ function WhySoBlock({ chatId, messageId }: { chatId: number; messageId: number }
   );
 }
 
+const MEDIA_LABELS: Record<string, string> = {
+  voice: "голосовое сообщение",
+  image: "фотография",
+  video: "видео",
+  gif: "GIF",
+  document: "документ",
+  sticker: "стикер",
+  other: "файл",
+};
+
+/* Files are served by the API, never linked from a filesystem path: the
+ * endpoint resolves chat+message ids itself and sends the bytes as an
+ * attachment. After retention deletes the file the transcript stays, so
+ * the block says so instead of offering a dead link. */
+function MediaBlock({ chatId, message }: { chatId: number; message: ChatMessage }) {
+  const label = MEDIA_LABELS[message.media_type ?? "other"] ?? "файл";
+  const href = `/api/chats/${chatId}/messages/${message.id}/media`;
+  return (
+    <div className="media-hint">
+      <Icon name="paperclip" size={14} /> {label}
+      {message.has_media ? (
+        <>
+          {" — "}
+          <a href={href} target="_blank" rel="noreferrer">
+            скачать
+          </a>
+        </>
+      ) : (
+        <span className="muted"> — файл удалён по сроку хранения</span>
+      )}
+    </div>
+  );
+}
+
 function MessageBlock({
   message,
   peerName,
@@ -199,9 +233,16 @@ function MessageBlock({
           </button>
         )}
       </div>
-      {message.media_type && <div className="media-hint">[{message.media_type}]</div>}
+      {message.media_type && (
+        <MediaBlock chatId={chatId} message={message} />
+      )}
       {message.body && <div>{message.body}</div>}
-      {message.transcript && <div className="muted">🎤 {message.transcript}</div>}
+      {message.transcript && (
+        <div className="muted">
+          {message.media_type === "image" ? "🖼 " : "🎤 "}
+          {message.transcript}
+        </div>
+      )}
       {message.delivery_status === "skipped_dry_run" && (
         <div className="plaque warn">
           <strong>DRY RUN:</strong> сообщение обработано, но не отправлено

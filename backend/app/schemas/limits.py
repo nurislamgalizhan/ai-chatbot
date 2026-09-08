@@ -29,6 +29,15 @@ class LimitsSettings(BaseModel):
     semantic_cache_enabled: bool
     semantic_cache_ttl_hours: int = Field(ge=1, le=720)
     allowed_link_domains: list[str] = Field(default_factory=list, max_length=20)
+    # --- media (phase 7) ---
+    transcription_enabled: bool
+    vision_enabled: bool
+    max_audio_seconds: int = Field(ge=5, le=600)
+    max_audio_file_mb: int = Field(ge=1, le=64)
+    max_images_per_dialog: int = Field(ge=0, le=50)
+    max_image_file_mb: int = Field(ge=1, le=32)
+    media_retention_days: int = Field(ge=1, le=365)
+    transcription_terms: str = Field(default="", max_length=1000)
 
 
 class PriceItem(BaseModel):

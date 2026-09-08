@@ -71,6 +71,19 @@ class Settings(BaseSettings):
     rag_top_k: int = 5
     rag_min_score: float = 0.35
 
+    # --- media (phase 7) ---
+    # Root of the media volume. Everything written there is addressed by a
+    # RELATIVE path stored in messages.media_ref; absolute paths and
+    # provider URLs never reach the database (SPEC §13).
+    media_dir: str = "/data/media"
+    media_download_timeout: float = 30.0
+    # Hosts the media downloader may fetch from. The URL comes from an
+    # untrusted payload and the worker shares a network with PostgreSQL
+    # and Redis, so this allowlist (plus https-only and no redirects) is
+    # what keeps it from becoming an SSRF primitive. Comma-separated
+    # suffixes; empty disables the check (never do that in prod).
+    media_download_hosts: str = "green-api.com,greenapi.com"
+
     retry_max_attempts: int = 3
     outbox_flush_interval_seconds: float = 1.0
     outbox_retry_base_seconds: float = 2.0
@@ -81,6 +94,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def media_download_host_list(self) -> tuple[str, ...]:
+        return tuple(h.strip().lower() for h in self.media_download_hosts.split(",") if h.strip())
 
     @property
     def cookie_secure(self) -> bool:

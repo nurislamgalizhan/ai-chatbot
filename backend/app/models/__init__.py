@@ -27,6 +27,7 @@ from app.models.knowledge import (
     KbFaqPattern,
     KbProcessingLog,
 )
+from app.models.media import MediaJob
 from app.models.settings import AppSetting
 from app.models.whatsapp import (
     InboundNotification,
@@ -58,6 +59,7 @@ __all__ = [
     "KbFaqMiss",
     "KbFaqPattern",
     "KbProcessingLog",
+    "MediaJob",
     "LoginChallenge",
     "Message",
     "ModelPrice",

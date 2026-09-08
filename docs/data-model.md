@@ -406,6 +406,30 @@ correlation_id — суб-корреляция вида `{correlation}:main:a{at
 `(status, created_at) WHERE status='held'` — планировщик подчищает зависшие
 резервы старше N минут.
 
+## 17a. `media_jobs` **[РАСШИРЕНИЕ, фаза 7]**
+
+id, message_id FK **UNIQUE**, chat_id FK, media_type, state
+(`pending`/`processing`/`done`/`refused`/`failed`), attempts int,
+lease_until, next_attempt_at, download_url text, mime_type, file_bytes,
+duration_seconds, sha256, error_code, created_at, updated_at.
+
+Зачем отдельная таблица, а не поля в `messages`: у медиа-обработки
+СВОЙ счётчик попыток и свой лиз. Общий `messages.retry_count` уже
+принадлежит AI-пайплайну (и вшит в sub-correlation резерва), поэтому
+голосовое, потратившее 2 попытки на транскрибацию, приходило бы к
+вызову модели без права на ретрай.
+
+`UNIQUE (message_id)` — повторная доставка уведомления или двойная
+постановка не создают вторую платную единицу работы.
+Индексы: частичные по `next_attempt_at` и `chat_id` для
+`state IN ('pending','processing')` — выборка воркера и проверка
+«чат ещё ждёт медиа» (она же держит порядок сообщений в чате).
+
+Плюс к `ai_calls` добавлен частичный UNIQUE
+`(correlation_id, call_type) WHERE call_type IN ('transcription','vision')`
+— барьер против повторной оплаты одного файла: строка вставляется ДО
+платного вызова, и ретрай после краха упирается в констрейнт.
+
 ## 18. Конфигурация и системные
 
 ### 18.1 `settings`

@@ -16,7 +16,9 @@ const EFFORTS = ["none", "low", "medium", "high"];
 const TEMPLATE_KEYS: { key: string; label: string }[] = [
   { key: "handoff", label: "Передача менеджеру" },
   { key: "offtopic", label: "Не по теме / отказ" },
-  { key: "media", label: "Получен файл (документ/видео/голосовое)" },
+  { key: "media", label: "Получен файл (документ/видео/фото)" },
+  { key: "audio_too_long", label: "Голосовое слишком длинное" },
+  { key: "media_sensitive", label: "Документ с личными данными" },
 ];
 const LANGS: { code: string; label: string }[] = [
   { code: "ru", label: "RU" },
@@ -62,6 +64,8 @@ function emptyTemplates(): FallbackTemplates {
     handoff: { ru: "", kk: "", en: "" },
     offtopic: { ru: "", kk: "", en: "" },
     media: { ru: "", kk: "", en: "" },
+    audio_too_long: { ru: "", kk: "", en: "" },
+    media_sensitive: { ru: "", kk: "", en: "" },
   };
 }
 

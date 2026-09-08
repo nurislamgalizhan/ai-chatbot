@@ -60,6 +60,10 @@ class MessageResponse(BaseModel):
     source: str
     body: str | None
     media_type: str | None
+    # Whether the file is still on disk (retention deletes it, the
+    # transcript stays). Deliberately a flag, not media_ref: a filesystem
+    # path has no business reaching the browser.
+    has_media: bool = False
     transcript: str | None
     state: str
     delivery_status: str | None

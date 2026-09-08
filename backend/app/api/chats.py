@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.media import storage
 from app.models import (
     AdminUser,
     AiCall,
@@ -46,7 +50,7 @@ from app.schemas.chats import (
     TagResponse,
 )
 from app.security.audit import record_audit
-from app.security.deps import client_ip, get_db, require_admin
+from app.security.deps import client_ip, get_app_settings, get_db, require_admin
 from app.services.chat_modes import set_mode
 from app.services.chats import clear_attention, send_panel_message, set_attention
 
@@ -54,6 +58,20 @@ router = APIRouter(prefix="/api/chats", tags=["chats"], dependencies=[Depends(re
 
 _PAGE_SIZE = 20
 _MESSAGES_PAGE_SIZE = 50
+# Served with a FIXED type from our own extension, never from the
+# provider's mimeType: an "image" that is really SVG/HTML must not be
+# rendered in the admin's origin. Anything unknown downloads as bytes.
+_MEDIA_CONTENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".ogg": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
+    ".aac": "audio/aac",
+    ".webm": "audio/webm",
+}
 
 NOT_FOUND = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Чат не найден")
 
@@ -242,6 +260,7 @@ async def list_messages(
             source=m.source.value,
             body=m.body,
             media_type=m.media_type.value if m.media_type else None,
+            has_media=m.media_ref is not None,
             transcript=m.transcript,
             state=m.state.value,
             delivery_status=m.delivery_status,
@@ -543,4 +562,49 @@ async def message_ai_call(
             rag_chunks=chunk_previews,
             created_at=call.created_at,
         ),
+    )
+
+
+@router.get("/{chat_id}/messages/{message_id}/media")
+async def message_media(
+    chat_id: int,
+    message_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Serve one stored media file to the panel.
+
+    Both ids are resolved and matched, so a message id alone cannot be
+    used to read another chat's file; the path comes from the database
+    and is re-validated against the media root (no traversal, no
+    symlinks out). Images were re-encoded to JPEG before being stored,
+    and everything is served as an attachment with a fixed content type
+    — a "photo" that was really SVG/HTML can never execute in the
+    admin's origin.
+    """
+    await _get_chat(db, chat_id)
+    message = (
+        await db.execute(
+            select(Message).where(Message.id == message_id, Message.chat_id == chat_id)
+        )
+    ).scalar_one_or_none()
+    if message is None or not message.media_ref:
+        # Also the retention case: the file is gone, the transcript stays.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Файл недоступен")
+    settings = get_app_settings(request)
+    try:
+        data = await asyncio.to_thread(storage.read_bytes, settings.media_dir, message.media_ref)
+    except storage.MediaStorageError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Файл недоступен"
+        ) from None
+    suffix = Path(message.media_ref).suffix.lower()
+    content_type = _MEDIA_CONTENT_TYPES.get(suffix, "application/octet-stream")
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="media-{message_id}{suffix}"',
+            "Cache-Control": "private, max-age=300",
+        },
     )

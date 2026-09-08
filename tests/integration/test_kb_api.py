@@ -225,9 +225,14 @@ async def test_search_preview_is_rate_limited(authed_client) -> None:
         statuses.append(response.status_code)
     assert statuses[:30] == [200] * 30
     assert statuses[30] == 429
-    assert "подождите" in (
-        await client.post("/api/kb/search", json={"query": "адрес"}, headers=headers)
-    ).json()["detail"]
+    assert (
+        "подождите"
+        in (
+            await client.post(
+                "/api/kb/search", json={"query": "адрес"}, headers=headers
+            )
+        ).json()["detail"]
+    )
 
 
 async def test_kb_import_is_idempotent_and_creates_drafts(db_engine) -> None:

@@ -30,7 +30,7 @@ from app.services.pricing import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-RATE = Decimal("500")  # 1 USD = 500 KZT for readable numbers
+RATE = Decimal(500)  # 1 USD = 500 KZT for readable numbers
 
 
 async def _seed_rate(maker: async_sessionmaker, rate: Decimal = RATE) -> None:
@@ -52,7 +52,9 @@ async def _set_limits_kzt(
         await set_setting(db, app_settings.DAILY_AI_BUDGET_KZT, float(day))
         await set_setting(db, app_settings.MONTHLY_AI_BUDGET_KZT, float(month))
         await set_setting(db, app_settings.MAX_AI_COST_PER_DIALOG_KZT, float(dialog))
-        await set_setting(db, app_settings.MAX_AI_COST_PER_USER_PER_DAY_KZT, float(user_day))
+        await set_setting(
+            db, app_settings.MAX_AI_COST_PER_USER_PER_DAY_KZT, float(user_day)
+        )
 
 
 def _maker(db_engine) -> async_sessionmaker:
@@ -229,12 +231,16 @@ async def test_threshold_alerts_once_per_period(db_engine) -> None:
         chat_id=1,
         phone="+77010000001",
     )
-    await budget.settle(maker, sub_correlation="c7:main", actual_usd=Decimal("0.010000"))
+    await budget.settle(
+        maker, sub_correlation="c7:main", actual_usd=Decimal("0.010000")
+    )
     async with maker() as db:
         alerts = (
             (
                 await db.execute(
-                    select(AlertNotification).where(AlertNotification.kind == "budget_day")
+                    select(AlertNotification).where(
+                        AlertNotification.kind == "budget_day"
+                    )
                 )
             )
             .scalars()
@@ -251,12 +257,14 @@ async def test_threshold_alerts_once_per_period(db_engine) -> None:
         phone="+77010000002",
     )
     # blocked (limit spent) — so seed nothing; call settle directly: no held rows -> no-op
-    await budget.settle(maker, sub_correlation="c8:main", actual_usd=Decimal("0"))
+    await budget.settle(maker, sub_correlation="c8:main", actual_usd=Decimal(0))
     async with maker() as db:
         count = len(
             (
                 await db.execute(
-                    select(AlertNotification).where(AlertNotification.kind == "budget_day")
+                    select(AlertNotification).where(
+                        AlertNotification.kind == "budget_day"
+                    )
                 )
             )
             .scalars()
@@ -299,7 +307,10 @@ def test_cost_formula_matches_manual_math() -> None:
         output_usd=Decimal("1.20"),
     )
     usage = Usage(
-        input_tokens=10_000, cached_input_tokens=4_000, output_tokens=300, reasoning_tokens=200
+        input_tokens=10_000,
+        cached_input_tokens=4_000,
+        output_tokens=300,
+        reasoning_tokens=200,
     )
     # (6000*0.20 + 4000*0.02 + 500*1.20) / 1M
     expected = (
@@ -324,10 +335,12 @@ async def test_price_journal_uses_effective_from(db_engine, settings) -> None:
     from app.models import FxRate
 
     async with maker() as db, db.begin():
-        db.add(FxRate(pair="USD/KZT", rate=Decimal("500"), effective_from=t1))
+        db.add(FxRate(pair="USD/KZT", rate=Decimal(500), effective_from=t1))
         db.add(
             FxRate(
-                pair="USD/KZT", rate=Decimal("600"), effective_from=t1 + timedelta(hours=1)
+                pair="USD/KZT",
+                rate=Decimal(600),
+                effective_from=t1 + timedelta(hours=1),
             )
         )
         for unit, price in (
@@ -345,8 +358,8 @@ async def test_price_journal_uses_effective_from(db_engine, settings) -> None:
             )
         )
     async with maker() as db:
-        assert await load_usd_kzt_rate(db, at=t1) == Decimal("500")
-        assert await load_usd_kzt_rate(db, at=t1 + timedelta(hours=2)) == Decimal("600")
+        assert await load_usd_kzt_rate(db, at=t1) == Decimal(500)
+        assert await load_usd_kzt_rate(db, at=t1 + timedelta(hours=2)) == Decimal(600)
         sheet_before = await load_price_sheet(db, "m", at=t1)
         sheet_after = await load_price_sheet(db, "m", at=t1 + timedelta(hours=2))
     assert sheet_before.input_usd == Decimal("0.20")

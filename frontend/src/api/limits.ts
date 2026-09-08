@@ -18,6 +18,14 @@ export interface LimitsSettings {
   semantic_cache_enabled: boolean;
   semantic_cache_ttl_hours: number;
   allowed_link_domains: string[];
+  transcription_enabled: boolean;
+  vision_enabled: boolean;
+  max_audio_seconds: number;
+  max_audio_file_mb: number;
+  max_images_per_dialog: number;
+  max_image_file_mb: number;
+  media_retention_days: number;
+  transcription_terms: string;
 }
 
 export interface PriceItem {

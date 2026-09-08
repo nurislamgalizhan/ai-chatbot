@@ -13,6 +13,8 @@ from app.models.enums import MediaType
 
 _MAX_TEXT_LEN = 8000
 _MAX_NAME_LEN = 200
+_MAX_URL_LEN = 2000
+_MAX_MIME_LEN = 120
 
 _MEDIA_BY_TYPE: dict[str, MediaType] = {
     "audioMessage": MediaType.VOICE,
@@ -30,6 +32,11 @@ class ParsedMessage:
     media_type: MediaType | None
     sender_name: str | None
     timestamp: int | None
+    # Media metadata (phase 7). The provider's file name is kept only for
+    # display/extension hints — it NEVER becomes a path on disk (traversal).
+    download_url: str | None = None
+    file_name: str | None = None
+    mime_type: str | None = None
 
 
 def phone_from_wa_chat_id(wa_chat_id: str) -> str:
@@ -49,12 +56,25 @@ def _clip(value: object, limit: int) -> str | None:
     return value.strip()[:limit]
 
 
+def _https_url(value: object) -> str | None:
+    """Only https download URLs are accepted: the payload is untrusted,
+    and file:// or http:// there would turn the downloader into an SSRF
+    or plaintext-fetch primitive."""
+    url = _clip(value, _MAX_URL_LEN)
+    if url is None or not url.lower().startswith("https://"):
+        return None
+    return url
+
+
 def parse_message(body: dict[str, Any]) -> ParsedMessage:
     message_data = _dict(body.get("messageData"))
     type_message = str(message_data.get("typeMessage", ""))
 
     text: str | None = None
     media: MediaType | None = None
+    download_url: str | None = None
+    file_name: str | None = None
+    mime_type: str | None = None
 
     if type_message in _TEXT_TYPES:
         text = _clip(
@@ -64,8 +84,12 @@ def parse_message(body: dict[str, Any]) -> ParsedMessage:
         )
     elif type_message in _MEDIA_BY_TYPE:
         media = _MEDIA_BY_TYPE[type_message]
-        # Caption travels with the file; the file itself is phase 7.
-        text = _clip((message_data.get("fileMessageData") or {}).get("caption"), _MAX_TEXT_LEN)
+        file_data = _dict(message_data.get("fileMessageData"))
+        # Caption travels with the file.
+        text = _clip(file_data.get("caption"), _MAX_TEXT_LEN)
+        download_url = _https_url(file_data.get("downloadUrl"))
+        file_name = _clip(file_data.get("fileName"), _MAX_NAME_LEN)
+        mime_type = _clip(file_data.get("mimeType"), _MAX_MIME_LEN)
     elif type_message:
         media = MediaType.OTHER
 
@@ -73,4 +97,12 @@ def parse_message(body: dict[str, Any]) -> ParsedMessage:
     sender_name = _clip(sender_data.get("senderName") or sender_data.get("chatName"), _MAX_NAME_LEN)
     raw_ts = body.get("timestamp")
     timestamp = int(raw_ts) if isinstance(raw_ts, int | float) else None
-    return ParsedMessage(text=text, media_type=media, sender_name=sender_name, timestamp=timestamp)
+    return ParsedMessage(
+        text=text,
+        media_type=media,
+        sender_name=sender_name,
+        timestamp=timestamp,
+        download_url=download_url,
+        file_name=file_name,
+        mime_type=mime_type,
+    )

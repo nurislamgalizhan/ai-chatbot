@@ -14,6 +14,7 @@ import httpx
 import structlog
 from pydantic import ValidationError
 
+from app.whatsapp.download_guard import DownloadNotAllowedError, check_download_url
 from app.whatsapp.provider import (
     ProviderError,
     RawNotification,
@@ -59,6 +60,14 @@ class GreenApiProvider(WhatsAppProvider):
             base_url=settings.green_api_media_url,
             timeout=max(settings.green_api_request_timeout, 60.0),
         )
+        # Incoming media: the payload carries an ABSOLUTE https URL, so
+        # this client has no base_url. Redirects are not followed — a
+        # redirect from an untrusted payload is an SSRF primitive.
+        self._download_client = httpx.AsyncClient(
+            timeout=settings.media_download_timeout,
+            follow_redirects=False,
+        )
+        self._download_hosts = settings.media_download_host_list
 
     def _path(self, method: str) -> str:
         return f"/waInstance{self._instance_id}/{method}/{self._token}"
@@ -147,6 +156,40 @@ class GreenApiProvider(WhatsAppProvider):
             raise _classify_status("sendFileByUpload", response.status_code)
         return self._send_result("sendFileByUpload", response.json())
 
+    async def download_file(self, url: str, max_bytes: int) -> bytes:
+        """Stream an incoming media file, aborting past max_bytes.
+
+        The URL comes from an untrusted payload, so it is checked against
+        the SSRF guard (https, host allowlist, public address) before a
+        single byte is fetched, redirects are not followed, and nothing
+        about the URL is ever logged or put into the error.
+        """
+        try:
+            check_download_url(url, self._download_hosts)
+        except DownloadNotAllowedError as exc:
+            raise ProviderError(str(exc), status_code=None, retryable=False) from exc
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            async with self._download_client.stream("GET", url) as response:
+                if response.status_code >= _HTTP_ERROR_MIN:
+                    raise _classify_status("downloadFile", response.status_code)
+                declared = response.headers.get("content-length")
+                if declared is not None and declared.isdigit() and int(declared) > max_bytes:
+                    raise ProviderError("downloadFile.too_large", status_code=None, retryable=False)
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        # Abort mid-stream: a lying content-length must not
+                        # be able to fill the disk.
+                        raise ProviderError(
+                            "downloadFile.too_large", status_code=None, retryable=False
+                        )
+                    chunks.append(chunk)
+        except httpx.HTTPError as exc:
+            raise ProviderError("downloadFile", status_code=None, retryable=True) from exc
+        return b"".join(chunks)
+
     async def get_instance_state(self) -> str:
         payload = await self._request("getStateInstance", "GET", self._path("getStateInstance"))
         try:
@@ -170,3 +213,4 @@ class GreenApiProvider(WhatsAppProvider):
     async def aclose(self) -> None:
         await self._client.aclose()
         await self._media_client.aclose()
+        await self._download_client.aclose()

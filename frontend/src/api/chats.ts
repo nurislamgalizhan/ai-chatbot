@@ -50,6 +50,7 @@ export interface ChatMessage {
   source: string;
   body: string | null;
   media_type: string | null;
+  has_media: boolean;
   transcript: string | null;
   state: string;
   delivery_status: string | null;

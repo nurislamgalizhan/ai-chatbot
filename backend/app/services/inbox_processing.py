@@ -30,6 +30,7 @@ from app.services.chats import (
     upsert_chat_for_incoming,
     upsert_chat_for_outgoing,
 )
+from app.services.media_processing import enqueue_media_job
 from app.services.wa_payload import parse_message, phone_from_wa_chat_id
 from app.whatsapp.classify import Kind, classify
 
@@ -104,7 +105,7 @@ async def _handle_incoming(
     # Stickers: fully ignored — no AI, no reply, but visible in history.
     state = MsgState.IGNORED if is_sticker else MsgState.QUEUED
     media = MediaType.STICKER if is_sticker else parsed.media_type
-    await insert_inbound_message(
+    message_id = await insert_inbound_message(
         db,
         chat_id,
         source=MsgSource.CUSTOMER,
@@ -114,6 +115,19 @@ async def _handle_incoming(
         media_type=media,
         sent_at=_ts(parsed.timestamp),
     )
+    # Voice and images need a paid pre-processing step before the AI can
+    # answer them; the job carries the download URL, which is available
+    # only here, while the raw payload is at hand (phase 7). Everything
+    # else (documents, video, gif, stickers) never goes to OpenAI.
+    if message_id is not None and media is not None and not is_sticker:
+        await enqueue_media_job(
+            db,
+            message_id=message_id,
+            chat_id=chat_id,
+            media_type=media,
+            download_url=parsed.download_url,
+            mime_type=parsed.mime_type,
+        )
 
 
 async def _handle_operator_phone(

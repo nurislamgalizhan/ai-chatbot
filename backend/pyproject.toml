@@ -25,6 +25,12 @@ dependencies = [
     "openai>=1.40",
     "openpyxl>=3.1",
     "tiktoken>=0.8",
+    # Media (phase 7): image compression and local audio-duration probing.
+    # Both are pure-Python/wheel deps — no ffmpeg or system binaries on the
+    # VPS, and duration is read locally so it costs nothing to reject a
+    # too-long voice message BEFORE the paid transcription call.
+    "pillow>=10.3",
+    "mutagen>=1.47",
 ]
 
 [project.optional-dependencies]

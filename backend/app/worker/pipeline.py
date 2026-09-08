@@ -44,6 +44,7 @@ from app.services.chat_modes import ai_allowed
 from app.services.chats import set_attention
 from app.services.generation import GenerationInput, generate_reply, pick_template
 from app.services.kb_text import detect_language, normalize_query
+from app.services.media_processing import PROCESSABLE, has_open_media_job
 from app.whatsapp.outbox import enqueue_text
 
 if TYPE_CHECKING:
@@ -83,6 +84,19 @@ def reply_outbound_id(correlation_id: str) -> uuid.UUID:
     return uuid.uuid5(REPLY_NAMESPACE, correlation_id)
 
 
+def message_text(message: Message) -> str:
+    """What the model sees for one message.
+
+    A voice note's words and an image's description live in `transcript`
+    (phase 7), the typed text and any file caption in `body`. Both are
+    included, caption first, so a photo sent with "сколько стоит?" keeps
+    both halves of the question — and so the description is reused in
+    later turns instead of the picture being sent again (SPEC §13).
+    """
+    parts = [(message.body or "").strip(), (message.transcript or "").strip()]
+    return "\n".join(part for part in parts if part)
+
+
 class AiPipeline:
     def __init__(self, deps: GenerationDeps) -> None:
         self._deps = deps
@@ -105,8 +119,15 @@ class AiPipeline:
                             Message.next_attempt_at.is_(None),
                             Message.next_attempt_at <= now,
                         ),
+                        # A chat still waiting on voice/image pre-processing
+                        # is NOT due: answering its text now would reply out
+                        # of order, and re-picking a chat we cannot finish
+                        # would spin this loop at 100% CPU (it only sleeps
+                        # when a pass handles nothing).
+                        ~has_open_media_job(Message.chat_id),
                     )
                     .group_by(Message.chat_id)
+                    .order_by(func.max(Message.created_at))
                     .limit(_CHAT_BATCH)
                 )
             ).all()
@@ -137,7 +158,10 @@ class AiPipeline:
         try:
             claim = await self._claim(chat_id)
             if claim is None:
-                return 1
+                # Nothing was claimed. Reporting work here would keep the
+                # worker loop from ever sleeping (it idles only on a zero
+                # pass) and burn a core on a 2-vCPU VPS.
+                return 0
             outcome = await generate_reply(self._deps, claim.generation_input)
             await self._persist(claim, outcome)
             return 1
@@ -205,15 +229,20 @@ class AiPipeline:
             if stale_found:
                 await set_attention(db, chat, AttentionReason.HANDOFF)
 
-            # 2. Media is a phase 7 feature — no stubs: hand it to a
-            # human. A free templated reply (no model call, no budget
-            # reserve) tells the customer their file was received
-            # instead of leaving them with silence, but only when the
-            # bot may speak in this chat at all (same gate as step 3).
+            # 2. Media. Voice and images arrive here already turned into
+            # text by the media processor (phase 7) and are answered like
+            # any other message. Everything else — documents, video, gif
+            # — is never sent to OpenAI: a human takes over, and a free
+            # templated reply (no model call, no budget reserve) tells
+            # the customer their file arrived instead of leaving them in
+            # silence, but only when the bot may speak in this chat at
+            # all (same gate as step 3).
             text_messages: list[Message] = []
             media_messages: list[Message] = []
             for message in fresh:
-                if message.media_type is not None:
+                if message.media_type in PROCESSABLE and (message.transcript or "").strip():
+                    text_messages.append(message)
+                elif message.media_type is not None:
                     message.state = MsgState.HANDED_TO_HUMAN
                     message.error_code = "media_unsupported"
                     media_messages.append(message)
@@ -267,7 +296,7 @@ class AiPipeline:
                 message.correlation_id = correlation_id
                 message.next_attempt_at = lease
 
-            question = "\n".join((m.body or "").strip() for m in text_messages)
+            question = "\n".join(message_text(m) for m in text_messages if message_text(m))
             language = detect_language(question)
             history = await self._history(db, chat_id, before_id=text_messages[0].id)
             memory_row = await db.get(ChatMemory, chat_id)
@@ -305,8 +334,12 @@ class AiPipeline:
         batch: list[Message],
         threshold: int,
     ) -> bool:
-        """N identical customer messages in a row (SPEC §6.7.5)."""
-        bodies = {normalize_query(m.body or "") for m in batch}
+        """N identical customer messages in a row (SPEC §6.7.5).
+
+        Compared on `message_text`, so five identical voice notes count as
+        spam too — their words live in `transcript`, not `body`.
+        """
+        bodies = {normalize_query(message_text(m)) for m in batch}
         if len(bodies) != 1:
             return False
         if len(batch) >= threshold:
@@ -315,12 +348,12 @@ class AiPipeline:
         previous = (
             (
                 await db.execute(
-                    select(Message.body)
+                    select(Message)
                     .where(
                         Message.chat_id == chat_id,
                         Message.source == MsgSource.CUSTOMER,
                         Message.id < batch[0].id,
-                        Message.body.is_not(None),
+                        or_(Message.body.is_not(None), Message.transcript.is_not(None)),
                     )
                     .order_by(Message.id.desc())
                     .limit(needed)
@@ -332,7 +365,7 @@ class AiPipeline:
         if len(previous) < needed:
             return False
         target = next(iter(bodies))
-        return all(normalize_query(body or "") == target for body in previous)
+        return all(normalize_query(message_text(m)) == target for m in previous)
 
     async def _history(
         self, db: AsyncSession, chat_id: int, *, before_id: int
@@ -344,7 +377,11 @@ class AiPipeline:
                     .where(
                         Message.chat_id == chat_id,
                         Message.id < before_id,
-                        Message.body.is_not(None),
+                        # A voice note or photo carries its text in
+                        # `transcript`; filtering on body alone would drop
+                        # it from history and the saved image description
+                        # would never be reused (SPEC §13).
+                        or_(Message.body.is_not(None), Message.transcript.is_not(None)),
                     )
                     .order_by(Message.id.desc())
                     .limit(_HISTORY_LIMIT)
@@ -361,7 +398,10 @@ class AiPipeline:
                 role = "assistant"
             else:
                 continue
-            turns.append(HistoryTurn(role=role, content=message.body or ""))
+            content = message_text(message)
+            if not content:
+                continue
+            turns.append(HistoryTurn(role=role, content=content))
         return turns
 
     # ------------------------------ persist -----------------------------
@@ -568,11 +608,15 @@ class AiPipeline:
                 .scalars()
                 .all()
             )
-            by_correlation: dict[str, list[Message]] = {}
+            # Grouped by (correlation, chat): orphans with no correlation
+            # would otherwise collapse into ONE group and the recovery
+            # would mark an unrelated chat as needing attention.
+            by_correlation: dict[tuple[str, int], list[Message]] = {}
             for message in orphans:
-                by_correlation.setdefault(message.correlation_id or "", []).append(message)
-            for correlation_id, group in by_correlation.items():
-                chat = await db.get(Chat, group[0].chat_id, with_for_update=True)
+                key = (message.correlation_id or "", message.chat_id)
+                by_correlation.setdefault(key, []).append(message)
+            for (correlation_id, group_chat_id), group in by_correlation.items():
+                chat = await db.get(Chat, group_chat_id, with_for_update=True)
                 if chat is None:
                     continue
                 reply = (
