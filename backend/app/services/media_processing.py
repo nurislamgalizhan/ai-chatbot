@@ -246,6 +246,30 @@ class MediaProcessor:
                     .with_for_update(skip_locked=True, of=MediaJob)
                 )
             ).all()
+            # Belt and braces for the same failure mode: anything left
+            # open whose message is no longer QUEUED is closed here, so
+            # a stuck job can never hold a chat hostage.
+            stale = (
+                (
+                    await db.execute(
+                        select(MediaJob)
+                        .join(Message, Message.id == MediaJob.message_id)
+                        .where(
+                            MediaJob.state.in_((MediaJobState.PENDING, MediaJobState.PROCESSING)),
+                            Message.state != MsgState.QUEUED,
+                        )
+                        .limit(_BATCH)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for orphan in stale:
+                orphan.state = MediaJobState.REFUSED
+                orphan.lease_until = None
+                orphan.next_attempt_at = None
+                orphan.error_code = orphan.error_code or "message_not_queued"
+
             for job_row, message in rows:
                 # The lease is taken BEFORE anything is downloaded or paid
                 # for: another pass sees a live lease and moves on.
@@ -742,6 +766,18 @@ class MediaProcessor:
             if job_row is None or message is None or chat is None:
                 await db.commit()
                 return
+            if job_row.state in (MediaJobState.DONE, MediaJobState.REFUSED, MediaJobState.FAILED):
+                # Already finished — the failure happened AFTER the
+                # outcome was committed (e.g. while composing the
+                # reply). Re-opening it would leave a job PENDING for a
+                # message that is no longer QUEUED, and `has_open_media_job`
+                # would then exclude this chat from the AI pipeline
+                # forever: the customer would never get another answer.
+                logger.warning(
+                    "media_post_commit_error", message_id=job.message_id, error_code=error_code
+                )
+                await db.commit()
+                return
             job_row.error_code = error_code
             job_row.lease_until = None
             terminal = False
@@ -787,6 +823,16 @@ class MediaProcessor:
 
         language = detect_language(job.caption or "")
         correlation_id = f"{job.correlation_id}:reply"
+        outbound_id = reply_outbound_id(correlation_id)
+        async with self._deps.sessionmaker() as db:
+            already = (
+                await db.execute(
+                    select(Message.id).where(Message.outbound_message_id == outbound_id)
+                )
+            ).scalar_one_or_none()
+        if already is not None:
+            return  # this refusal was answered — do not pay to say it twice
+
         reply = await compose_service_reply(
             GenerationDeps(
                 sessionmaker=self._deps.sessionmaker,
@@ -803,16 +849,7 @@ class MediaProcessor:
             style=style,
         )
 
-        outbound_id = reply_outbound_id(correlation_id)
         async with self._deps.sessionmaker() as db:
-            exists = (
-                await db.execute(
-                    select(Message.id).where(Message.outbound_message_id == outbound_id)
-                )
-            ).scalar_one_or_none()
-            if exists is not None:
-                await db.commit()
-                return  # already answered this refusal
             db.add(
                 Message(
                     chat_id=job.chat_id,

@@ -382,6 +382,14 @@ async def document_log(
 # ------------------------------ FAQ ------------------------------
 
 
+async def _faq_patterns(db: AsyncSession, faq_id: int) -> list[KbFaqPattern]:
+    return list(
+        (await db.execute(select(KbFaqPattern).where(KbFaqPattern.faq_id == faq_id)))
+        .scalars()
+        .all()
+    )
+
+
 async def _faq_items(db: AsyncSession, faqs: list[KbFaq]) -> list[FaqItem]:
     if not faqs:
         return []
@@ -535,8 +543,16 @@ async def update_faq_answer(
             detail="У активной записи русский ответ должен быть утверждён",
         )
     before = {"status": getattr(faq, status_field).value}
+    text_changed = body.language == "ru" and answer != faq.answer_ru
     setattr(faq, answer_field, answer)
     setattr(faq, status_field, new_status)
+    if text_changed:
+        # Same rule as PATCH /faq/{id}: an approved translation describes
+        # the OLD Russian text, so it stops being deliverable until a
+        # human re-approves it.
+        for other_status in ("answer_kk_status", "answer_en_status"):
+            if getattr(faq, other_status) is AnswerStatus.APPROVED:
+                setattr(faq, other_status, AnswerStatus.MACHINE)
     await bump_kb_version(db)
     await db.flush()
     await record_audit(
@@ -681,13 +697,19 @@ async def translate_faq_answer(
             detail="Сначала нужен русский ответ — он источник перевода",
         )
     target = KbLanguage(body.language)
+    source_ru = faq.answer_ru
+    # The request's transaction must not stay open across a network call
+    # to OpenAI: on a small VPS that ties up a pool connection for
+    # seconds. Everything needed is read out first.
+    await db.commit()
     try:
         result = await translate_answer(
-            _ai_deps(request), faq_id=faq.id, source_ru=faq.answer_ru, target=target
+            _ai_deps(request), faq_id=faq_id, source_ru=source_ru, target=target
         )
     except KbAiError as exc:
         raise _ai_http_error(exc) from exc
 
+    faq = await _get_faq(db, faq_id)
     answer_field, status_field = _ANSWER_FIELDS[body.language]
     setattr(faq, answer_field, result.text)
     setattr(faq, status_field, AnswerStatus.MACHINE)
@@ -741,10 +763,16 @@ async def suggest_faq_patterns(
         .all()
     )
     try:
+        # The Russian phrasing is the real question; normalized_key is a
+        # database slug and makes for a much worse prompt.
+        topic = next(
+            (p.pattern for p in await _faq_patterns(db, faq.id) if p.language is KbLanguage.RU),
+            faq.normalized_key,
+        )
         result = await suggest_patterns(
             _ai_deps(request),
             faq_id=faq.id,
-            topic=faq.normalized_key,
+            topic=topic,
             answer_ru=faq.answer_ru,
             target=target,
             existing=list(existing),
@@ -752,6 +780,7 @@ async def suggest_faq_patterns(
     except KbAiError as exc:
         raise _ai_http_error(exc) from exc
 
+    faq = await _get_faq(db, faq_id)
     added = 0
     for phrase in result.patterns:
         candidate = build_pattern(faq.id, target, phrase)

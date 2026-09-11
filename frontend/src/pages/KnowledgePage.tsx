@@ -146,6 +146,9 @@ function FaqDrawer({ entry, onClose }: { entry: FaqEntry; onClose: () => void })
   const queryClient = useQueryClient();
   const [lang, setLang] = useState<KbLang>("ru");
   const [text, setText] = useState("");
+  // Saved text for the CURRENT language: lets the drawer warn before a
+  // language switch throws away something the owner just typed.
+  const [saved, setSaved] = useState("");
   const [phrase, setPhrase] = useState("");
   const [note, setNote] = useState<string | null>(null);
 
@@ -161,13 +164,29 @@ function FaqDrawer({ entry, onClose }: { entry: FaqEntry; onClose: () => void })
   };
   // Remounting on language change keeps the textarea from ever showing
   // another language's text (the old page had exactly that bug).
-  useEffect(() => setText(answers[lang] ?? ""), [entry.id, lang, entry.updated_at]);
+  useEffect(() => {
+    setText(answers[lang] ?? "");
+    setSaved(answers[lang] ?? "");
+  }, [entry.id, lang, entry.updated_at]);
+
+  function switchLanguage(next: KbLang) {
+    if (text !== saved && !confirm("Правки не сохранены. Переключить язык и потерять их?"))
+      return;
+    setLang(next);
+  }
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["kb-faq"] });
   const saveRu = useMutation({
     mutationFn: () => updateFaq(entry.id, { answer_ru: text.trim() }),
-    onSuccess: () => {
-      setNote("Русский ответ сохранён.");
+    onSuccess: (updated) => {
+      const demoted =
+        (entry.answer_kk_status === "approved" && updated.answer_kk_status === "machine") ||
+        (entry.answer_en_status === "approved" && updated.answer_en_status === "machine");
+      setNote(
+        demoted
+          ? "Русский ответ сохранён. Переводы стали черновиками — проверьте и утвердите заново."
+          : "Русский ответ сохранён.",
+      );
       void refresh();
     },
   });
@@ -264,7 +283,7 @@ function FaqDrawer({ entry, onClose }: { entry: FaqEntry; onClose: () => void })
                 key={l.code}
                 type="button"
                 className={lang === l.code ? "active" : ""}
-                onClick={() => setLang(l.code)}
+                onClick={() => switchLanguage(l.code)}
               >
                 {l.label}
                 {statuses[l.code] === "approved" && <span className="dot ok" />}
@@ -546,7 +565,7 @@ function QaTab({ openId, onOpen }: { openId: number | null; onOpen: (id: number 
         )}
       </div>
 
-      {opened && <FaqDrawer entry={opened} onClose={() => onOpen(null)} />}
+      {opened && <FaqDrawer key={opened.id} entry={opened} onClose={() => onOpen(null)} />}
     </>
   );
 }
@@ -749,7 +768,9 @@ function DocsTab({ openId, onOpen }: { openId: number | null; onOpen: (id: numbe
         )}
       </div>
 
-      {openId !== null && <DocDrawer id={openId} onClose={() => onOpen(null)} />}
+      {openId !== null && (
+        <DocDrawer key={openId} id={openId} onClose={() => onOpen(null)} />
+      )}
     </>
   );
 }

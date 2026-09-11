@@ -281,7 +281,13 @@ class GenerationOutcome:
 
     @property
     def paid(self) -> bool:
-        return self.kind == "model"
+        """Did this outcome cost anything?
+
+        Not just a model answer: since templates were replaced by
+        composed text, a refusal or a handoff is a (small) paid call
+        too, and the dialog's running cost must include it.
+        """
+        return self.kind == "model" or self.cost_usd > 0
 
 
 async def _record_ai_call(

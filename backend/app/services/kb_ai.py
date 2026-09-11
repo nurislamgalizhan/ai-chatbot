@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import structlog
 
@@ -216,14 +217,24 @@ async def _paid_call(
     estimate = estimate_max_cost_usd(
         prices, count_tokens(system) + count_tokens(user) + 50, max_output_tokens
     )
-    sub_correlation = f"{correlation_id}:a0"
-    reserved = await budget.reserve(
-        deps.sessionmaker,
-        sub_correlation=sub_correlation,
-        chat_id=None,
-        phone=None,
-        estimate_usd=estimate,
-    )
+    # A fresh id per click. With a fixed suffix the UNIQUE
+    # (correlation_id, ledger_id) makes the SECOND reservation a no-op
+    # (ON CONFLICT DO NOTHING) that still reports success — the call
+    # would be paid for outside the budget and never reach spent_usd.
+    sub_correlation = f"{correlation_id}:{uuid4().hex[:12]}"
+    try:
+        reserved = await budget.reserve(
+            deps.sessionmaker,
+            sub_correlation=sub_correlation,
+            chat_id=None,
+            phone=None,
+            estimate_usd=estimate,
+        )
+    except PricingError as exc:
+        # Reserving needs the USD/KZT rate too; without it the owner
+        # should see what to fix, not a 500.
+        msg = "Не задан курс USD/KZT — укажите его в разделе «Лимиты»"
+        raise KbAiError(msg) from exc
     if not reserved.allowed:
         msg = "Достигнут лимит расходов — автогенерация остановлена"
         raise KbAiError(msg)
@@ -263,7 +274,9 @@ async def _paid_call(
         cost_kzt = usd_to_kzt(cost_usd, rate) if rate is not None else Decimal(0)
         db.add(
             AiCall(
-                correlation_id=correlation_id,
+                # The exact call, so a repeat is a separate row and the
+                # accounting matches the reservation one-to-one.
+                correlation_id=sub_correlation,
                 chat_id=None,  # admin-side work, not a customer dialog
                 call_type=CallType.CHAT,
                 model=completion.model,

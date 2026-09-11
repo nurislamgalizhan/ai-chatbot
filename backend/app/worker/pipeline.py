@@ -79,6 +79,7 @@ class _MediaAck:
     chat_id: int
     instance_id: int
     wa_chat_id: str
+    phone: str
     correlation_id: str
     language: KbLanguage
     style: str | None
@@ -300,7 +301,7 @@ class AiPipeline:
                     message.state = MsgState.HANDED_TO_HUMAN
                     message.error_code = "ai_off"
                 await db.commit()
-                return _ClaimResult()
+                return _ClaimResult(media_ack=media_ack)
 
             # 4. Client rate limit, then spam — free exits, no reply.
             phone_ok_min = await rate_limit.allow(
@@ -314,14 +315,14 @@ class AiPipeline:
                     message.state = MsgState.IGNORED
                     message.error_code = "rate_limited"
                 await db.commit()
-                return _ClaimResult()
+                return _ClaimResult(media_ack=media_ack)
 
             if await self._is_spam(db, chat_id, text_messages, spam_threshold):
                 for message in text_messages:
                     message.state = MsgState.IGNORED
                     message.error_code = "spam"
                 await db.commit()
-                return _ClaimResult()
+                return _ClaimResult(media_ack=media_ack)
 
             # 5. Claim: deterministic correlation + PROCESSING lease.
             correlation_id = f"chat:{chat_id}:msg:{text_messages[-1].id}"
@@ -360,7 +361,7 @@ class AiPipeline:
                 ),
             )
             await db.commit()
-            return _ClaimResult(claim=claim)
+            return _ClaimResult(claim=claim, media_ack=media_ack)
 
     async def _is_spam(
         self,
@@ -594,6 +595,7 @@ class AiPipeline:
             chat_id=chat.id,
             instance_id=chat.instance_id,
             wa_chat_id=chat.wa_chat_id,
+            phone=chat.phone,
             correlation_id=f"chat:{chat.id}:media:{media_messages[-1].id}",
             language=language,
             style=instruction.style if instruction else None,
@@ -611,6 +613,9 @@ class AiPipeline:
             language=ack.language,
             correlation_id=ack.correlation_id,
             chat_id=ack.chat_id,
+            # Without the phone the per-user daily budget scope is
+            # skipped and this spend escapes that limit.
+            phone=ack.phone,
             style=ack.style,
         )
         async with self._deps.sessionmaker() as db:

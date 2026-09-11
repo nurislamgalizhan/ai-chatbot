@@ -704,3 +704,66 @@ async def test_image_is_stored_re_encoded_without_exif(media_env) -> None:
     with Image.open(io.BytesIO(stored)) as result:
         assert dict(result.getexif()) == {}
         assert max(result.size) == 1280  # shrunk for money
+
+
+async def test_failure_after_the_outcome_is_committed_never_freezes_the_chat(
+    media_env, monkeypatch
+) -> None:
+    """The worst failure mode this section can have.
+
+    A refusal commits its terminal state and only then composes the
+    reply. If composing blows up, the old code re-opened the job as
+    PENDING — while the message was no longer QUEUED, so nothing could
+    ever claim it again. `has_open_media_job` would then exclude the
+    chat from the AI pipeline FOREVER: the customer is answered never
+    again, and nothing in the panel says why.
+    """
+    maker = media_env["maker"]
+    media_env["download"].payload = make_wav(200.0)  # too long -> refusal
+    chat_id = await make_chat(maker, media_env["instance_pk"])
+    message_id = await add_media_message(maker, chat_id)
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("provider exploded while composing the refusal")
+
+    monkeypatch.setattr(media_env["processor"], "_send_service_reply", boom)
+    await media_env["processor"].run_once()
+
+    job = await get_job(maker, message_id)
+    message = await get_message(maker, message_id)
+    assert message.state is MsgState.HANDED_TO_HUMAN  # outcome survived
+    # The job stays CLOSED, so the chat is not held hostage.
+    assert job.state is MediaJobState.REFUSED
+    async with maker() as db:
+        blocked = (
+            (
+                await db.execute(
+                    select(MediaJob).where(
+                        MediaJob.chat_id == chat_id,
+                        MediaJob.state.in_(
+                            (MediaJobState.PENDING, MediaJobState.PROCESSING)
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert blocked == []
+
+
+async def test_orphan_job_of_a_finished_message_is_closed(media_env) -> None:
+    """Belt and braces for the same thing: whatever leaves a job open for
+    a message that is no longer QUEUED, the next pass closes it."""
+    maker = media_env["maker"]
+    chat_id = await make_chat(maker, media_env["instance_pk"])
+    message_id = await add_media_message(maker, chat_id)
+    async with maker() as db, db.begin():
+        message = await db.get(Message, message_id)
+        message.state = MsgState.HANDED_TO_HUMAN  # finished by a human
+
+    await media_env["processor"].run_once()
+
+    job = await get_job(maker, message_id)
+    assert job.state is MediaJobState.REFUSED
+    assert job.error_code == "message_not_queued"

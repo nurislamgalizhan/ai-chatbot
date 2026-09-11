@@ -335,3 +335,97 @@ async def test_pattern_helper_still_owns_normalization(db_engine) -> None:
     pattern = build_pattern(1, KbLanguage.RU, "  Какой У ВАС Адрес?  ")
     assert pattern.normalized_pattern == "какой у вас адрес"
     assert pattern.token_key == sorted({"адрес"})
+
+
+async def test_second_click_is_not_free_for_the_budget(
+    ai_client, chat_provider, db_engine
+) -> None:
+    """Every click is a separate paid action, not a retry of the first.
+
+    With a fixed reservation id the second one hit UNIQUE(correlation,
+    ledger) and was skipped — the call still went to OpenAI, but the
+    budget never saw it, so no limit could ever stop it.
+    """
+    client, headers = ai_client
+    chat_provider.script = [
+        make_result("где вы находитесь\n", input_tokens=300),
+        make_result("как до вас доехать\n", input_tokens=300),
+    ]
+    faq = await make_faq(client, headers)
+
+    for _ in range(2):
+        response = await client.post(
+            f"/api/kb/faq/{faq['id']}/suggest-patterns",
+            json={"language": "ru"},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+
+    maker = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with maker() as db:
+        calls = (await db.execute(select(AiCall))).scalars().all()
+        ledgers = (await db.execute(select(BudgetLedger))).scalars().all()
+    assert len(calls) == 2
+    spent = sum(call.cost_usd for call in calls)
+    # Both calls are visible in every scope, so the limit can act on them.
+    for ledger in ledgers:
+        assert ledger.spent_usd == spent
+        assert ledger.reserved_usd == 0
+
+
+async def test_limit_stops_the_repeat(ai_client, chat_provider, db_engine) -> None:
+    """The consequence of the above: once the budget is spent, a repeat
+    is refused instead of quietly costing money."""
+    client, headers = ai_client
+    chat_provider.script = [
+        make_result("где вы находитесь\n"),
+        make_result("ещё вариант\n"),
+    ]
+    faq = await make_faq(client, headers)
+    first = await client.post(
+        f"/api/kb/faq/{faq['id']}/suggest-patterns",
+        json={"language": "ru"},
+        headers=headers,
+    )
+    assert first.status_code == 200
+
+    maker = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with maker() as db, db.begin():
+        for ledger in (await db.execute(select(BudgetLedger))).scalars().all():
+            ledger.limit_usd = Decimal("0.000001")
+
+    second = await client.post(
+        f"/api/kb/faq/{faq['id']}/suggest-patterns",
+        json={"language": "ru"},
+        headers=headers,
+    )
+
+    assert second.status_code == 422
+    assert "лимит" in second.json()["detail"].lower()
+    assert len(chat_provider.requests) == 1  # the second call never happened
+
+
+async def test_editing_russian_through_the_language_endpoint_also_demotes(
+    ai_client,
+) -> None:
+    """The demotion rule must hold on BOTH edit paths, or the hole just
+    moves to the other endpoint."""
+    client, headers = ai_client
+    faq = await make_faq(client, headers)
+    await client.patch(
+        f"/api/kb/faq/{faq['id']}/answer",
+        json={"language": "kk", "answer": KK_TRANSLATION, "status": "approved"},
+        headers=headers,
+    )
+
+    updated = await client.patch(
+        f"/api/kb/faq/{faq['id']}/answer",
+        json={
+            "language": "ru",
+            "answer": "Новый адрес: Достык 5.",
+            "status": "approved",
+        },
+        headers=headers,
+    )
+
+    assert updated.json()["answer_kk_status"] == "machine"
