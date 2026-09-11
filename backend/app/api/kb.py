@@ -28,6 +28,9 @@ from app.models import (
 )
 from app.models.enums import AnswerStatus, DocStatus, KbLanguage, SourceType
 from app.schemas.kb import (
+    AiGenerationResponse,
+    AiLanguageRequest,
+    AiPatternsRequest,
     ChunkItem,
     ChunkListResponse,
     DocumentCreateRequest,
@@ -42,6 +45,7 @@ from app.schemas.kb import (
     FaqListResponse,
     FaqPatternCreateRequest,
     FaqPatternItem,
+    FaqUpdateRequest,
     LanguageMissResponse,
     LanguageMissRow,
     ProcessingLogItem,
@@ -55,6 +59,8 @@ from app.schemas.kb import (
 from app.security import rate_limit
 from app.security.audit import record_audit
 from app.security.deps import client_ip, get_app_settings, get_db, get_redis, require_admin
+from app.services.generation import GenerationDeps
+from app.services.kb_ai import KbAiError, suggest_patterns, translate_answer
 from app.services.kb_faq import build_pattern, match_faq, missing_pattern_languages
 from app.services.kb_indexing import mark_for_indexing
 from app.services.kb_search import search_chunks
@@ -501,6 +507,238 @@ async def update_faq_answer(
         correlation_id=getattr(request.state, "correlation_id", None),
     )
     return (await _faq_items(db, [faq]))[0]
+
+
+@router.patch("/faq/{faq_id}", response_model=FaqItem)
+async def update_faq(
+    faq_id: int,
+    body: FaqUpdateRequest,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> FaqItem:
+    """Fix the Russian answer or the category of an existing entry.
+
+    Without this a typo meant re-creating the record, and there was no
+    way to delete the old one — the answer a client sees would stay
+    wrong forever.
+    """
+    faq = await _get_faq(db, faq_id)
+    changes = body.model_dump(exclude_unset=True)
+    before = {"category": faq.category}
+    if "answer_ru" in changes and changes["answer_ru"] is not None:
+        faq.answer_ru = changes["answer_ru"].strip()
+        # The owner wrote it themselves, so it is approved by definition;
+        # translations of the OLD text become stale drafts, never
+        # silently kept as approved for a text that no longer exists.
+        faq.answer_ru_status = AnswerStatus.APPROVED
+        for status_field in ("answer_kk_status", "answer_en_status"):
+            if getattr(faq, status_field) is AnswerStatus.APPROVED:
+                setattr(faq, status_field, AnswerStatus.MACHINE)
+    if "category" in changes:
+        faq.category = changes["category"]
+    await db.flush()
+    await record_audit(
+        db,
+        action="kb.faq_updated",
+        actor_user_id=user.id,
+        entity_type="kb_faq",
+        entity_id=str(faq.id),
+        before=before,
+        after={"category": faq.category, "answer_ru_changed": "answer_ru" in changes},
+        ip=client_ip(request),
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+    return (await _faq_items(db, [faq]))[0]
+
+
+@router.delete("/faq/{faq_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_faq(
+    faq_id: int,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Hard delete: patterns cascade, and an entry nobody can reach is
+    worse than no entry (it keeps catching questions)."""
+    faq = await _get_faq(db, faq_id)
+    await db.execute(delete(KbFaqPattern).where(KbFaqPattern.faq_id == faq_id))
+    await db.delete(faq)
+    await record_audit(
+        db,
+        action="kb.faq_deleted",
+        actor_user_id=user.id,
+        entity_type="kb_faq",
+        entity_id=str(faq_id),
+        before={"key": faq.normalized_key},
+        ip=client_ip(request),
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+
+
+# --------------------- AI assistance (paid actions) ---------------------
+
+# Generation costs money on every click, so it is rate limited like the
+# sandbox: a stuck button or an impatient double-click cannot drain the
+# budget.
+_AI_RATE_LIMIT = 20
+_AI_RATE_WINDOW_SECONDS = 60
+
+
+def _ai_deps(request: Request) -> GenerationDeps:
+    return GenerationDeps(
+        sessionmaker=request.app.state.sessionmaker,
+        settings=get_app_settings(request),
+        redis=get_redis(request),
+        chat_provider=getattr(request.app.state, "chat_provider", None),
+        embedding_provider=getattr(request.app.state, "embedding_provider", None),
+    )
+
+
+async def _check_ai_rate(redis: Redis) -> None:
+    if not await rate_limit.allow(redis, "rl:kb:ai", _AI_RATE_LIMIT, _AI_RATE_WINDOW_SECONDS):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Слишком много запросов к автогенерации — подождите минуту",
+        )
+
+
+def _ai_http_error(exc: KbAiError) -> HTTPException:
+    return HTTPException(
+        status_code=(
+            status.HTTP_503_SERVICE_UNAVAILABLE
+            if exc.retryable
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        ),
+        detail=str(exc),
+    )
+
+
+@router.post("/faq/{faq_id}/translate", response_model=AiGenerationResponse)
+async def translate_faq_answer(
+    faq_id: int,
+    body: AiLanguageRequest,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> AiGenerationResponse:
+    """Translate the Russian answer into kk/en with the model.
+
+    The result is saved as a `machine` DRAFT: the owner's policy is that
+    no machine text ever reaches a client unapproved, and this endpoint
+    does not bend it — it only removes the typing.
+    """
+    await _check_ai_rate(redis)
+    faq = await _get_faq(db, faq_id)
+    if not faq.answer_ru or faq.answer_ru_status is not AnswerStatus.APPROVED:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Сначала нужен русский ответ — он источник перевода",
+        )
+    target = KbLanguage(body.language)
+    try:
+        result = await translate_answer(
+            _ai_deps(request), faq_id=faq.id, source_ru=faq.answer_ru, target=target
+        )
+    except KbAiError as exc:
+        raise _ai_http_error(exc) from exc
+
+    answer_field, status_field = _ANSWER_FIELDS[body.language]
+    setattr(faq, answer_field, result.text)
+    setattr(faq, status_field, AnswerStatus.MACHINE)
+    await db.flush()
+    await record_audit(
+        db,
+        action="kb.faq_translated",
+        actor_user_id=user.id,
+        entity_type="kb_faq",
+        entity_id=str(faq.id),
+        after={"language": body.language, "status": AnswerStatus.MACHINE.value},
+        ip=client_ip(request),
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+    return AiGenerationResponse(
+        item=(await _faq_items(db, [faq]))[0], cost_kzt=str(result.cost_kzt)
+    )
+
+
+@router.post("/faq/{faq_id}/suggest-patterns", response_model=AiGenerationResponse)
+async def suggest_faq_patterns(
+    faq_id: int,
+    body: AiPatternsRequest,
+    request: Request,
+    user: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> AiGenerationResponse:
+    """Ask the model how customers actually phrase this question.
+
+    Matching is exact, so coverage depends on having real phrasings —
+    the one part of FAQ setup a human is genuinely bad at.
+    """
+    await _check_ai_rate(redis)
+    faq = await _get_faq(db, faq_id)
+    if not faq.answer_ru:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Сначала нужен русский ответ — по нему подбираются формулировки",
+        )
+    target = KbLanguage(body.language)
+    existing = (
+        (
+            await db.execute(
+                select(KbFaqPattern.pattern).where(
+                    KbFaqPattern.faq_id == faq_id, KbFaqPattern.language == target
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    try:
+        result = await suggest_patterns(
+            _ai_deps(request),
+            faq_id=faq.id,
+            topic=faq.normalized_key,
+            answer_ru=faq.answer_ru,
+            target=target,
+            existing=list(existing),
+        )
+    except KbAiError as exc:
+        raise _ai_http_error(exc) from exc
+
+    added = 0
+    for phrase in result.patterns:
+        candidate = build_pattern(faq.id, target, phrase)
+        # A phrase already pointing at ANOTHER entry must not be stolen:
+        # the unique index would 409 the whole request, so skip quietly.
+        clash = (
+            await db.execute(
+                select(KbFaqPattern.id).where(
+                    KbFaqPattern.language == target,
+                    KbFaqPattern.normalized_pattern == candidate.normalized_pattern,
+                )
+            )
+        ).scalar_one_or_none()
+        if clash is not None:
+            continue
+        db.add(candidate)
+        added += 1
+    await db.flush()
+    await record_audit(
+        db,
+        action="kb.faq_patterns_suggested",
+        actor_user_id=user.id,
+        entity_type="kb_faq",
+        entity_id=str(faq.id),
+        after={"language": body.language, "added": added},
+        ip=client_ip(request),
+        correlation_id=getattr(request.state, "correlation_id", None),
+    )
+    return AiGenerationResponse(
+        item=(await _faq_items(db, [faq]))[0], cost_kzt=str(result.cost_kzt), added=added
+    )
 
 
 @router.post("/faq/{faq_id}/patterns", response_model=FaqItem)

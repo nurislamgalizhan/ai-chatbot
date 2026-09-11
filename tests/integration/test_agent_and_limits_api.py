@@ -26,7 +26,6 @@ from tests.conftest import login
 INSTRUCTION = {
     "system_prompt": "Ты — вежливый консультант центра. Отвечай только по услугам.",
     "style": "Коротко, по делу.",
-    "fallback_templates": {"handoff": {"ru": "Передал менеджеру."}},
     "max_output_tokens": 300,
     "reasoning_effort": "low",
 }
@@ -108,7 +107,6 @@ async def test_sandbox_runs_and_accounts_money_with_chat_id_null(
             db,
             system_prompt="Ты — консультант центра, отвечай по делу.",
             style=None,
-            fallback_templates={},
             escalation_rules=None,
             max_output_tokens=None,
             reasoning_effort=None,

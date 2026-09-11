@@ -29,6 +29,7 @@ from app.media import storage
 from app.models import AiCall, BudgetLedger, Chat, MediaJob, Message, WaOutbox
 from app.models.enums import (
     BudgetScope,
+    CallType,
     ChatMode,
     MediaJobState,
     MediaType,
@@ -38,7 +39,6 @@ from app.models.enums import (
 )
 from app.services import app_settings
 from app.services.app_settings import set_setting
-from app.services.generation import DEFAULT_TEMPLATES
 from app.services.media_processing import MediaDeps, MediaProcessor, enqueue_media_job
 from app.services.pricing import seed_default_prices
 from app.whatsapp.provider import ProviderError, WhatsAppProvider
@@ -49,6 +49,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 TRANSCRIPT = "Здравствуйте, сколько стоит абонемент в тренажерный зал?"
 DESCRIPTION = "На фото стойка администратора с прайс-листом."
 DOWNLOAD_URL = "https://media.green-api.com/file/voice-1.ogg"
+# Refusals are written by the model now (owner decision 2026-09-11), so
+# the fake scripts them; four copies cover the busiest single test.
+SERVICE = "Файл получил, передал менеджеру — скоро свяжутся."
 
 
 def make_wav(seconds: float, *, rate: int = 8000) -> bytes:
@@ -141,7 +144,8 @@ async def media_env(db_engine, settings, instance_pk, tmp_path):
         ]
     )
     chat_provider = FakeChatProvider(
-        vision_script=[make_result(DESCRIPTION, input_tokens=1500)]
+        script=[make_result(SERVICE, input_tokens=200) for _ in range(4)],
+        vision_script=[make_result(DESCRIPTION, input_tokens=1500)],
     )
     download = FakeDownloadProvider(make_wav(8.0))
     deps = MediaDeps(
@@ -324,11 +328,14 @@ async def test_too_long_voice_is_refused_before_paying(media_env) -> None:
     assert media_env["transcription"].requests == []  # nothing paid
 
     replies = await get_replies(maker, chat_id)
-    assert [r.body for r in replies] == [DEFAULT_TEMPLATES["audio_too_long"]["ru"]]
+    assert [r.body for r in replies] == [SERVICE]
     async with maker() as db:
-        assert (await db.execute(select(AiCall))).scalars().all() == []
+        calls = (await db.execute(select(AiCall))).scalars().all()
         chat = await db.get(Chat, chat_id)
         outbox = (await db.execute(select(WaOutbox))).scalars().all()
+    # The expensive part — transcription — never happened. The only call
+    # is the cheap one that phrases the refusal.
+    assert [c.call_type for c in calls] == [CallType.CHAT]
     assert chat.needs_attention is True
     assert len(outbox) == 1  # the refusal is actually queued for sending
 
@@ -359,7 +366,7 @@ async def test_sensitive_photo_never_reaches_openai(media_env, caption: str) -> 
     assert message.transcript is None
     assert media_env["chat_provider"].vision_requests == []  # the image never left
     replies = await get_replies(maker, chat_id)
-    assert [r.body for r in replies] == [DEFAULT_TEMPLATES["media_sensitive"]["ru"]]
+    assert [r.body for r in replies] == [SERVICE]
 
 
 async def test_vision_disabled_hands_photo_to_human_with_a_reply(media_env) -> None:
@@ -378,9 +385,7 @@ async def test_vision_disabled_hands_photo_to_human_with_a_reply(media_env) -> N
     assert message.state is MsgState.HANDED_TO_HUMAN
     assert message.error_code == "media_disabled"
     assert media_env["download"].calls == []  # not even downloaded
-    assert [r.body for r in await get_replies(maker, chat_id)] == [
-        DEFAULT_TEMPLATES["media"]["ru"]
-    ]
+    assert [r.body for r in await get_replies(maker, chat_id)] == [SERVICE]
 
 
 async def test_stale_voice_is_refused_before_download(media_env) -> None:
@@ -499,7 +504,10 @@ async def test_same_file_is_never_paid_for_twice(media_env) -> None:
     assert message.error_code == "already_charged"
     async with maker() as db:
         calls = (await db.execute(select(AiCall))).scalars().all()
-    assert len(calls) == 1
+    # Exactly ONE transcription, no matter how many times the job runs;
+    # the extra row is the (cheap) refusal message, not a second charge.
+    transcriptions = [c for c in calls if c.call_type is CallType.TRANSCRIPTION]
+    assert len(transcriptions) == 1
 
 
 async def test_no_second_claim_while_a_lease_is_held(media_env) -> None:
@@ -569,9 +577,7 @@ async def test_retries_are_bounded_and_end_with_a_human(media_env) -> None:
     assert job.attempts <= 4  # retry_max_attempts, not an endless loop
     message = await get_message(maker, message_id)
     assert message.state is MsgState.HANDED_TO_HUMAN
-    assert [r.body for r in await get_replies(maker, chat_id)] == [
-        DEFAULT_TEMPLATES["media"]["ru"]
-    ]
+    assert [r.body for r in await get_replies(maker, chat_id)] == [SERVICE]
 
 
 async def test_empty_transcript_is_terminal_not_an_infinite_loop(media_env) -> None:

@@ -42,7 +42,11 @@ from app.services.app_settings import get_setting
 from app.services.chat_memory import remember, snapshot
 from app.services.chat_modes import ai_allowed
 from app.services.chats import set_attention
-from app.services.generation import GenerationInput, generate_reply, pick_template
+from app.services.generation import (
+    GenerationInput,
+    compose_service_reply,
+    generate_reply,
+)
 from app.services.kb_text import detect_language, normalize_query
 from app.services.media_processing import PROCESSABLE, has_open_media_job
 from app.whatsapp.outbox import enqueue_text
@@ -65,6 +69,32 @@ class _Claim:
     retry_count: int
     language: KbLanguage
     generation_input: GenerationInput
+
+
+@dataclass(frozen=True)
+class _MediaAck:
+    """A file the bot cannot read: everything needed to say so, once the
+    claim transaction is closed."""
+
+    chat_id: int
+    instance_id: int
+    wa_chat_id: str
+    correlation_id: str
+    language: KbLanguage
+    style: str | None
+
+
+@dataclass(frozen=True)
+class _ClaimResult:
+    """What one claim produced: work to answer, a file to acknowledge,
+    or neither."""
+
+    claim: _Claim | None = None
+    media_ack: _MediaAck | None = None
+
+    @property
+    def did_work(self) -> bool:
+        return self.claim is not None or self.media_ack is not None
 
 
 # Namespace for uuid5(correlation) -> deterministic outbound ids.
@@ -156,14 +186,18 @@ class AiPipeline:
         if not acquired:
             return 0
         try:
-            claim = await self._claim(chat_id)
-            if claim is None:
-                # Nothing was claimed. Reporting work here would keep the
-                # worker loop from ever sleeping (it idles only on a zero
-                # pass) and burn a core on a 2-vCPU VPS.
-                return 0
-            outcome = await generate_reply(self._deps, claim.generation_input)
-            await self._persist(claim, outcome)
+            result = await self._claim(chat_id)
+            # The acknowledgement is composed AFTER the claim commits:
+            # its model call must not run while the chat row is locked.
+            if result.media_ack is not None:
+                await self._send_media_ack(result.media_ack)
+            if result.claim is None:
+                # Nothing claimed and nothing said. Reporting work here
+                # would keep the worker loop from ever sleeping (it idles
+                # only on a zero pass) and burn a core on a 2-vCPU VPS.
+                return 1 if result.did_work else 0
+            outcome = await generate_reply(self._deps, result.claim.generation_input)
+            await self._persist(result.claim, outcome)
             return 1
         finally:
             # Token-guarded release (best effort; the TTL is the backstop).
@@ -174,12 +208,12 @@ class AiPipeline:
 
     # ------------------------------ claim -------------------------------
 
-    async def _claim(self, chat_id: int) -> _Claim | None:  # noqa: PLR0911, PLR0912, PLR0915 - the gate ladder IS the SPEC §6.7 order
+    async def _claim(self, chat_id: int) -> _ClaimResult:  # noqa: PLR0911, PLR0912, PLR0915 - the gate ladder IS the SPEC §6.7 order
         now = datetime.now(UTC)
         async with self._deps.sessionmaker() as db:
             chat = await db.get(Chat, chat_id, with_for_update=True)
             if chat is None:
-                return None
+                return _ClaimResult()
             messages = (
                 (
                     await db.execute(
@@ -203,7 +237,7 @@ class AiPipeline:
             )
             if not messages:
                 await db.commit()
-                return None
+                return _ClaimResult()
 
             max_age_minutes = int(await get_setting(db, app_settings.AI_MAX_MESSAGE_AGE_MINUTES))
             emergency_off = bool(await get_setting(db, app_settings.EMERGENCY_AI_OFF))
@@ -251,13 +285,14 @@ class AiPipeline:
                     message.error_code = "empty"
                 else:
                     text_messages.append(message)
+            media_ack: _MediaAck | None = None
             if media_messages:
                 await set_attention(db, chat, AttentionReason.HANDOFF)
                 if ai_allowed(chat, emergency_off=emergency_off):
-                    await self._reply_media_received(db, chat, media_messages)
+                    media_ack = await self._plan_media_ack(db, chat, media_messages)
             if not text_messages:
                 await db.commit()
-                return None
+                return _ClaimResult(media_ack=media_ack)
 
             # 3. THE mode gate (недочёт №5): emergency switch + chat mode.
             if not ai_allowed(chat, emergency_off=emergency_off):
@@ -265,7 +300,7 @@ class AiPipeline:
                     message.state = MsgState.HANDED_TO_HUMAN
                     message.error_code = "ai_off"
                 await db.commit()
-                return None
+                return _ClaimResult()
 
             # 4. Client rate limit, then spam — free exits, no reply.
             phone_ok_min = await rate_limit.allow(
@@ -279,14 +314,14 @@ class AiPipeline:
                     message.state = MsgState.IGNORED
                     message.error_code = "rate_limited"
                 await db.commit()
-                return None
+                return _ClaimResult()
 
             if await self._is_spam(db, chat_id, text_messages, spam_threshold):
                 for message in text_messages:
                     message.state = MsgState.IGNORED
                     message.error_code = "spam"
                 await db.commit()
-                return None
+                return _ClaimResult()
 
             # 5. Claim: deterministic correlation + PROCESSING lease.
             correlation_id = f"chat:{chat_id}:msg:{text_messages[-1].id}"
@@ -325,7 +360,7 @@ class AiPipeline:
                 ),
             )
             await db.commit()
-            return claim
+            return _ClaimResult(claim=claim)
 
     async def _is_spam(
         self,
@@ -538,16 +573,16 @@ class AiPipeline:
         ).scalar_one_or_none()
         return int(existing) if existing is not None else None
 
-    async def _reply_media_received(
+    async def _plan_media_ack(
         self, db: AsyncSession, chat: Chat, media_messages: list[Message]
-    ) -> None:
-        """Free acknowledgement for a document/video/voice/etc. the bot
-        does not analyze (phase 7 scope): no model call, no budget
-        reserve — just a template in the customer's language so they are
-        not left with silence while a human reviews the file. Idempotent
-        via the same deterministic-outbound-id + ON CONFLICT DO NOTHING
-        pattern as a regular AI reply: a retry of this claim cannot
-        double-send it."""
+    ) -> _MediaAck:
+        """Collect what is needed to acknowledge an unreadable file.
+
+        Only collection happens here: the wording is written by the
+        model (owner decision 2026-09-11 — no canned templates), and a
+        model call must not run while the claim transaction holds a lock
+        on the chat row.
+        """
         captions = "\n".join((m.body or "").strip() for m in media_messages if m.body)
         memory = await db.get(ChatMemory, chat.id)
         if memory is not None and memory.language in ("ru", "kk", "en"):
@@ -555,18 +590,41 @@ class AiPipeline:
         else:
             language = detect_language(captions)
         instruction = await get_active_instruction(db)
-        text = pick_template(instruction, "media", language)
-        correlation_id = f"chat:{chat.id}:media:{media_messages[-1].id}"
-        reply_id = await self._insert_reply(db, chat.id, correlation_id, text)
-        if reply_id is not None:
-            await enqueue_text(
-                db,
-                chat.instance_id,
-                chat.wa_chat_id,
-                text,
-                reply_outbound_id(correlation_id),
-                correlation_id,
-            )
+        return _MediaAck(
+            chat_id=chat.id,
+            instance_id=chat.instance_id,
+            wa_chat_id=chat.wa_chat_id,
+            correlation_id=f"chat:{chat.id}:media:{media_messages[-1].id}",
+            language=language,
+            style=instruction.style if instruction else None,
+        )
+
+    async def _send_media_ack(self, ack: _MediaAck) -> None:
+        """Tell the customer their file arrived, in their language.
+
+        Idempotent through the deterministic outbound id: a re-run
+        cannot send it twice.
+        """
+        reply = await compose_service_reply(
+            self._deps,
+            reason="media",
+            language=ack.language,
+            correlation_id=ack.correlation_id,
+            chat_id=ack.chat_id,
+            style=ack.style,
+        )
+        async with self._deps.sessionmaker() as db:
+            reply_id = await self._insert_reply(db, ack.chat_id, ack.correlation_id, reply.text)
+            if reply_id is not None:
+                await enqueue_text(
+                    db,
+                    ack.instance_id,
+                    ack.wa_chat_id,
+                    reply.text,
+                    reply_outbound_id(ack.correlation_id),
+                    ack.correlation_id,
+                )
+            await db.commit()
 
     async def _notify_not_configured(self, db: AsyncSession, chat: Chat, error_code: str) -> None:
         throttle_key = "ai:event:not_configured"

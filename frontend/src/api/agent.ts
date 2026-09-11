@@ -7,7 +7,6 @@ export interface FallbackTemplates {
 export interface InstructionPayload {
   system_prompt: string;
   style: string | null;
-  fallback_templates: FallbackTemplates;
   escalation_rules: Record<string, unknown> | null;
   max_output_tokens: number | null;
   reasoning_effort: string | null;

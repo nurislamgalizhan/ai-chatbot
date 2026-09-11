@@ -14,7 +14,6 @@ class InstructionPayload(BaseModel):
     system_prompt: str = Field(min_length=20, max_length=20_000)
     style: str | None = Field(default=None, max_length=4_000)
     # {"handoff": {"ru": ..., "kk": ..., "en": ...}, "offtopic": {...}}
-    fallback_templates: dict[str, dict[str, str]] = Field(default_factory=dict)
     escalation_rules: dict[str, Any] | None = None
     max_output_tokens: int | None = Field(default=None, ge=50, le=2_000)
     reasoning_effort: str | None = Field(default=None, pattern=_EFFORT_PATTERN)
@@ -26,7 +25,6 @@ class InstructionItem(BaseModel):
     is_active: bool
     system_prompt: str
     style: str | None
-    fallback_templates: dict[str, Any]
     escalation_rules: dict[str, Any] | None
     max_output_tokens: int | None
     reasoning_effort: str | None

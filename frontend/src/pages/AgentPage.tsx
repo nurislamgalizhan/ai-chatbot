@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import {
   activateInstruction,
   createInstruction,
-  type FallbackTemplates,
   type Instruction,
   listInstructions,
   runSandbox,
@@ -13,18 +12,6 @@ import { ApiError } from "../api/client";
 import Icon from "../components/icons";
 
 const EFFORTS = ["none", "low", "medium", "high"];
-const TEMPLATE_KEYS: { key: string; label: string }[] = [
-  { key: "handoff", label: "Передача менеджеру" },
-  { key: "offtopic", label: "Не по теме / отказ" },
-  { key: "media", label: "Получен файл (документ/видео/фото)" },
-  { key: "audio_too_long", label: "Голосовое слишком длинное" },
-  { key: "media_sensitive", label: "Документ с личными данными" },
-];
-const LANGS: { code: string; label: string }[] = [
-  { code: "ru", label: "RU" },
-  { code: "kk", label: "KK" },
-  { code: "en", label: "EN" },
-];
 
 /** White-label scaffold per docs/knowledge-base-import.md §4: the owner
  *  fills in the organization specifics; SPEC §14.1 security rules are
@@ -58,28 +45,6 @@ const PREFILL = `#РОЛЬ
 Не выдумывай цены, расписание и условия — только данные из справки.
 Нет данных — скажи честно и предложи передать вопрос администратору.
 Не обещай «сам забронирую» — только «передал заявку менеджеру».`;
-
-function emptyTemplates(): FallbackTemplates {
-  return {
-    handoff: { ru: "", kk: "", en: "" },
-    offtopic: { ru: "", kk: "", en: "" },
-    media: { ru: "", kk: "", en: "" },
-    audio_too_long: { ru: "", kk: "", en: "" },
-    media_sensitive: { ru: "", kk: "", en: "" },
-  };
-}
-
-function templatesFrom(instruction: Instruction | null): FallbackTemplates {
-  const base = emptyTemplates();
-  if (!instruction) return base;
-  for (const key of Object.keys(base)) {
-    const stored = instruction.fallback_templates?.[key];
-    if (stored && typeof stored === "object") {
-      base[key] = { ...base[key], ...stored };
-    }
-  }
-  return base;
-}
 
 function SandboxPanel() {
   const [question, setQuestion] = useState("");
@@ -172,7 +137,6 @@ export default function AgentPage() {
   const [style, setStyle] = useState("");
   const [maxTokens, setMaxTokens] = useState<string>("");
   const [effort, setEffort] = useState<string>("");
-  const [templates, setTemplates] = useState<FallbackTemplates>(emptyTemplates());
   const [loadedVersion, setLoadedVersion] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -184,7 +148,6 @@ export default function AgentPage() {
     setStyle(source.style ?? "");
     setMaxTokens(source.max_output_tokens?.toString() ?? "");
     setEffort(source.reasoning_effort ?? "");
-    setTemplates(templatesFrom(source));
     setLoadedVersion(source.version);
   }, [items, active, loadedVersion]);
 
@@ -193,7 +156,6 @@ export default function AgentPage() {
       createInstruction({
         system_prompt: prompt.trim(),
         style: style.trim() || null,
-        fallback_templates: templates,
         escalation_rules: null,
         max_output_tokens: maxTokens ? Number(maxTokens) : null,
         reasoning_effort: effort || null,
@@ -218,7 +180,6 @@ export default function AgentPage() {
     setStyle(instruction.style ?? "");
     setMaxTokens(instruction.max_output_tokens?.toString() ?? "");
     setEffort(instruction.reasoning_effort ?? "");
-    setTemplates(templatesFrom(instruction));
     setLoadedVersion(instruction.version);
     setNotice(`В редактор загружена v${instruction.version} — сохранение создаст новую версию.`);
   }
@@ -290,29 +251,11 @@ export default function AgentPage() {
               </select>
             </label>
           </div>
-          <h3>Шаблонные ответы</h3>
           <p className="muted">
-            Отдаются без вызова модели: при передаче менеджеру, лимите бюджета
-            и вопросах не по теме. Пустое поле — используется встроенный текст.
+            Отказы и передачу менеджеру бот формулирует сам, на языке клиента —
+            заранее заданных текстов больше нет. Тон этих сообщений задаётся
+            полем «Стиль» выше.
           </p>
-          {TEMPLATE_KEYS.map(({ key, label }) => (
-            <div key={key} className="template-row">
-              <span className="template-label">{label}</span>
-              {LANGS.map(({ code, label: langLabel }) => (
-                <input
-                  key={code}
-                  value={templates[key]?.[code] ?? ""}
-                  placeholder={langLabel}
-                  onChange={(e) =>
-                    setTemplates((prev) => ({
-                      ...prev,
-                      [key]: { ...prev[key], [code]: e.target.value },
-                    }))
-                  }
-                />
-              ))}
-            </div>
-          ))}
           {notice && <div className="plaque warn">{notice}</div>}
           {saveError && <div className="error">{saveError}</div>}
           <div className="actions-row">

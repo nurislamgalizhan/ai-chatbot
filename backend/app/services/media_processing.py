@@ -19,8 +19,9 @@ Money discipline (SPEC §13, §9):
 - attempts live on the job, not on messages.retry_count, which belongs
   to the AI pipeline's own retry budget.
 
-Nothing here decides what to SAY: refusal texts come from the owner's
-templates, and answering is the AI pipeline's job.
+Nothing here decides what to SAY: refusal wording is written by the
+model in `compose_service_reply` (no canned templates since
+2026-09-11), and answering the customer is the AI pipeline's job.
 """
 
 from __future__ import annotations
@@ -58,10 +59,10 @@ from app.models.enums import (
     MsgState,
 )
 from app.services import app_settings, budget
+from app.services.agent import get_active_instruction
 from app.services.app_settings import get_setting
 from app.services.chat_modes import ai_allowed
 from app.services.chats import set_attention
-from app.services.generation import pick_template
 from app.services.kb_text import detect_language
 from app.services.pricing import (
     PricingError,
@@ -714,8 +715,9 @@ class MediaProcessor:
             job_row.error_code = error_code
 
     async def _refuse(self, job: _Job, error_code: str, *, template: str) -> None:
-        """Terminal and free: a human takes over, and the customer hears
-        about it via an owner template — never silence."""
+        """Terminal: a human takes over, and the customer hears about it
+        — never silence. State is committed FIRST so a failure while
+        composing the message cannot lose the handoff."""
         async with self._deps.sessionmaker() as db:
             message = await db.get(Message, job.message_id)
             chat = await db.get(Chat, job.chat_id)
@@ -727,8 +729,8 @@ class MediaProcessor:
             message.error_code = error_code
             await set_attention(db, chat, AttentionReason.HANDOFF, job.correlation_id)
             await self._close_job(db, job, MediaJobState.REFUSED, error_code)
-            await self._enqueue_template(db, chat, template, job)
             await db.commit()
+        await self._send_service_reply(job, template)
         logger.info("media_refused", message_id=job.message_id, error_code=error_code)
 
     async def _fail(self, job: _Job, error_code: str, *, retryable: bool) -> None:
@@ -742,6 +744,7 @@ class MediaProcessor:
                 return
             job_row.error_code = error_code
             job_row.lease_until = None
+            terminal = False
             if retryable and job_row.attempts < self._deps.settings.retry_max_attempts:
                 job_row.state = MediaJobState.PENDING
                 job_row.next_attempt_at = datetime.now(UTC) + timedelta(
@@ -753,44 +756,79 @@ class MediaProcessor:
                 message.state = MsgState.HANDED_TO_HUMAN
                 message.error_code = error_code
                 await set_attention(db, chat, AttentionReason.PROCESSING_ERROR, job.correlation_id)
-                await self._enqueue_template(db, chat, "media", job)
+                terminal = True
             await db.commit()
+        if terminal:
+            # Composed after the commit: the handoff must survive even if
+            # the model cannot phrase the message.
+            await self._send_service_reply(job, "media")
         logger.warning(
             "media_failed", message_id=job.message_id, error_code=error_code, retryable=retryable
         )
 
-    async def _enqueue_template(
-        self, db: AsyncSession, chat: Chat, template_key: str, job: _Job
-    ) -> None:
-        """Free templated reply (no model call) for a refusal the customer
-        must hear about: too-long audio, a sensitive photo, a limit."""
-        from app.services.agent import get_active_instruction  # noqa: PLC0415 - import cycle
+    async def _send_service_reply(self, job: _Job, reason: str) -> None:
+        """Tell the customer what happened with their file.
+
+        The wording comes from the model (owner decision 2026-09-11: no
+        canned templates), so it is composed in its OWN step, never
+        while a transaction is open. Idempotent through the
+        deterministic outbound id: a repeat cannot double-send.
+        """
+        from app.services.generation import GenerationDeps, compose_service_reply  # noqa: PLC0415
         from app.whatsapp.outbox import enqueue_text  # noqa: PLC0415 - import cycle
         from app.worker.pipeline import reply_outbound_id  # noqa: PLC0415 - import cycle
 
+        async with self._deps.sessionmaker() as db:
+            chat = await db.get(Chat, job.chat_id)
+            instruction = await get_active_instruction(db)
+            style = instruction.style if instruction else None
+        if chat is None:
+            return
+
         language = detect_language(job.caption or "")
-        instruction = await get_active_instruction(db)
-        text = pick_template(instruction, template_key, language)
         correlation_id = f"{job.correlation_id}:reply"
-        outbound_id = reply_outbound_id(correlation_id)
-        exists = (
-            await db.execute(select(Message.id).where(Message.outbound_message_id == outbound_id))
-        ).scalar_one_or_none()
-        if exists is not None:
-            return  # idempotent: this refusal was already answered
-        db.add(
-            Message(
-                chat_id=chat.id,
-                direction=MsgDirection.OUT,
-                source=MsgSource.AI,
-                outbound_message_id=outbound_id,
-                body=text,
-                state=MsgState.GENERATED,
-                correlation_id=correlation_id,
-            )
+        reply = await compose_service_reply(
+            GenerationDeps(
+                sessionmaker=self._deps.sessionmaker,
+                settings=self._deps.settings,
+                redis=self._deps.redis,
+                chat_provider=self._deps.chat_provider,
+                embedding_provider=None,
+            ),
+            reason=reason,
+            language=language,
+            correlation_id=correlation_id,
+            chat_id=job.chat_id,
+            phone=chat.phone,
+            style=style,
         )
-        await db.flush()
-        await enqueue_text(db, chat.instance_id, chat.wa_chat_id, text, outbound_id, correlation_id)
+
+        outbound_id = reply_outbound_id(correlation_id)
+        async with self._deps.sessionmaker() as db:
+            exists = (
+                await db.execute(
+                    select(Message.id).where(Message.outbound_message_id == outbound_id)
+                )
+            ).scalar_one_or_none()
+            if exists is not None:
+                await db.commit()
+                return  # already answered this refusal
+            db.add(
+                Message(
+                    chat_id=job.chat_id,
+                    direction=MsgDirection.OUT,
+                    source=MsgSource.AI,
+                    outbound_message_id=outbound_id,
+                    body=reply.text,
+                    state=MsgState.GENERATED,
+                    correlation_id=correlation_id,
+                )
+            )
+            await db.flush()
+            await enqueue_text(
+                db, chat.instance_id, chat.wa_chat_id, reply.text, outbound_id, correlation_id
+            )
+            await db.commit()
 
 
 def sanitize_description(text: str) -> str:

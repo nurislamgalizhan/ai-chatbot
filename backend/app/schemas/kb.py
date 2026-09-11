@@ -146,6 +146,42 @@ class FaqPatternCreateRequest(BaseModel):
     pattern: str = Field(min_length=2, max_length=200)
 
 
+class FaqUpdateRequest(BaseModel):
+    """Editing the entry itself. The Russian answer is the source of
+    truth and stays hand-written, so it is editable here; kk/en go
+    through the per-language endpoint with its approval rules."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer_ru: str | None = Field(default=None, min_length=1, max_length=4000)
+    category: str | None = Field(default=None, max_length=60)
+
+
+class AiLanguageRequest(BaseModel):
+    """Target language for an AI action. Russian is excluded: it is the
+    owner's own text, never machine-written."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    language: Literal["kk", "en"]
+
+
+class AiPatternsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    language: Language
+
+
+class AiGenerationResponse(BaseModel):
+    """Result of a paid admin-side generation: the updated entry plus
+    what it cost, because every paid action in this panel says its
+    price out loud."""
+
+    item: FaqItem
+    cost_kzt: str
+    added: int = 0
+
+
 class TranslationReviewItem(BaseModel):
     """One row of the translation review screen: the ru source next to
     the draft awaiting approval."""
