@@ -121,12 +121,45 @@ async def test_faq_creation_activation_and_language_gates(authed_client) -> None
     assert activated.json()["is_active"] is True
 
 
-async def test_faq_activation_requires_kk_patterns(authed_client) -> None:
-    """kk patterns are mandatory even when there is no kk answer yet."""
+async def test_entry_is_created_without_kazakh_but_cannot_be_switched_on(
+    authed_client,
+) -> None:
+    """The form is two fields ("question -> answer"), so Kazakh phrasings
+    are no longer demanded up front. The rule itself did not go away: the
+    entry simply cannot be activated, and the reason is reported as a
+    checklist instead of a 422 the owner collects after clicking."""
     client, headers = authed_client
     payload = {**FAQ_PAYLOAD, "normalized_key": "phones", "patterns_kk": []}
-    response = await client.post("/api/kb/faq", json=payload, headers=headers)
-    assert response.status_code == 422  # schema requires at least one kk pattern
+
+    created = await client.post("/api/kb/faq", json=payload, headers=headers)
+
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["is_active"] is False
+    assert body["can_activate"] is False
+    assert "не указано, как спрашивают по-казахски" in body["blockers"]
+
+    refused = await client.post(
+        f"/api/kb/faq/{body['id']}/activate", json={"is_active": True}, headers=headers
+    )
+    assert refused.status_code == 422
+
+
+async def test_key_is_generated_from_the_question(authed_client) -> None:
+    """The owner is never asked to invent a database identifier."""
+    client, headers = authed_client
+    created = await client.post(
+        "/api/kb/faq",
+        json={
+            "category": None,
+            "answer_ru": "Мы работаем с 07:00 до 23:00.",
+            "patterns_ru": ["во сколько вы работаете"],
+            "patterns_kk": ["қашан жұмыс істейсіздер"],
+        },
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["normalized_key"] == "vo-skolko-vy-rabotaete"
 
 
 async def test_machine_translation_flow_and_single_entry_approval(

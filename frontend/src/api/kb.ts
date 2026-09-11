@@ -42,7 +42,17 @@ export interface FaqEntry {
   answer_en: string | null;
   answer_en_status: AnswerStatus;
   patterns: FaqPattern[];
+  can_activate: boolean;
+  blockers: string[];
+  misses_kk: number;
+  misses_en: number;
   updated_at: string;
+}
+
+export interface AiGenerationResult {
+  item: FaqEntry;
+  cost_kzt: string;
+  added: number;
 }
 
 export interface TranslationRow {
@@ -121,7 +131,7 @@ export const documentLog = (id: number) =>
 export const listFaq = () => api<{ items: FaqEntry[] }>("GET", "/api/kb/faq");
 
 export const createFaq = (payload: {
-  normalized_key: string;
+  normalized_key?: string;
   category: string | null;
   answer_ru: string;
   patterns_ru: string[];
@@ -158,16 +168,39 @@ export const languageMisses = () =>
     "/api/kb/faq/language-misses",
   );
 
+export interface SearchHit {
+  chunk_id: number;
+  document_id: number;
+  title: string;
+  content: string;
+  score: number;
+}
+
+export interface SearchResult {
+  faq_hit: string | null;
+  faq_language_miss: boolean;
+  detected_language: KbLang;
+  hits: SearchHit[];
+}
+
 export const searchPreview = (query: string) =>
-  api<{
-    faq_hit: string | null;
-    faq_language_miss: boolean;
-    detected_language: KbLang;
-    hits: {
-      chunk_id: number;
-      document_id: number;
-      title: string;
-      content: string;
-      score: number;
-    }[];
-  }>("POST", "/api/kb/search", { query });
+  api<SearchResult>("POST", "/api/kb/search", { query });
+
+export const updateFaq = (
+  id: number,
+  payload: { answer_ru?: string; category?: string | null },
+) => api<FaqEntry>("PATCH", `/api/kb/faq/${id}`, payload);
+
+export const deleteFaq = (id: number) => api<void>("DELETE", `/api/kb/faq/${id}`);
+
+/** Paid: the model writes the translation; it is stored as a draft the
+ *  client can never receive until the owner approves it. */
+export const translateFaq = (id: number, language: "kk" | "en") =>
+  api<AiGenerationResult>("POST", `/api/kb/faq/${id}/translate`, { language });
+
+/** Paid: the model proposes how clients actually phrase this question. */
+export const suggestPatterns = (id: number, language: KbLang) =>
+  api<AiGenerationResult>("POST", `/api/kb/faq/${id}/suggest-patterns`, { language });
+
+export const deleteFaqPattern = (faqId: number, patternId: number) =>
+  api<FaqEntry>("DELETE", `/api/kb/faq/${faqId}/patterns/${patternId}`);

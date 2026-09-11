@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from redis.asyncio import Redis
@@ -61,7 +62,13 @@ from app.security.audit import record_audit
 from app.security.deps import client_ip, get_app_settings, get_db, get_redis, require_admin
 from app.services.generation import GenerationDeps
 from app.services.kb_ai import KbAiError, suggest_patterns, translate_answer
-from app.services.kb_faq import build_pattern, match_faq, missing_pattern_languages
+from app.services.kb_faq import (
+    activation_blockers,
+    build_pattern,
+    match_faq,
+    missing_pattern_languages,
+    slugify_key,
+)
 from app.services.kb_indexing import mark_for_indexing
 from app.services.kb_search import search_chunks
 from app.services.kb_text import detect_language, normalize_query, token_key
@@ -84,6 +91,18 @@ async def _get_document(db: AsyncSession, document_id: int) -> KbDocument:
     if document is None or document.deleted_at is not None:
         raise DOC_NOT_FOUND
     return document
+
+
+async def _unique_key(db: AsyncSession, base: str) -> str:
+    """First free `base`, `base-2`, `base-3`… — the owner never sees it."""
+    for suffix in range(1, 50):
+        candidate = base if suffix == 1 else f"{base}-{suffix}"
+        taken = (
+            await db.execute(select(KbFaq.id).where(KbFaq.normalized_key == candidate))
+        ).scalar_one_or_none()
+        if taken is None:
+            return candidate
+    return f"{base}-{uuid4().hex[:6]}"
 
 
 async def _get_faq(db: AsyncSession, faq_id: int) -> KbFaq:
@@ -378,6 +397,7 @@ async def _faq_items(db: AsyncSession, faqs: list[KbFaq]) -> list[FaqItem]:
         .all()
     )
     by_faq: dict[int, list[FaqPatternItem]] = {}
+    languages: dict[int, set[str]] = {}
     for pattern in patterns:
         by_faq.setdefault(pattern.faq_id, []).append(
             FaqPatternItem(
@@ -386,23 +406,44 @@ async def _faq_items(db: AsyncSession, faqs: list[KbFaq]) -> list[FaqItem]:
                 pattern=pattern.pattern,
             )
         )
-    return [
-        FaqItem(
-            id=faq.id,
-            normalized_key=faq.normalized_key,
-            category=faq.category,
-            is_active=faq.is_active,
-            answer_ru=faq.answer_ru,
-            answer_ru_status=faq.answer_ru_status.value,
-            answer_kk=faq.answer_kk,
-            answer_kk_status=faq.answer_kk_status.value,
-            answer_en=faq.answer_en,
-            answer_en_status=faq.answer_en_status.value,
-            patterns=by_faq.get(faq.id, []),
-            updated_at=faq.updated_at,
+        languages.setdefault(pattern.faq_id, set()).add(pattern.language.value)
+
+    # One group-by for the whole page instead of a query per row.
+    miss_rows = (
+        await db.execute(
+            select(KbFaqMiss.faq_id, KbFaqMiss.language, func.count())
+            .where(KbFaqMiss.faq_id.in_([f.id for f in faqs]))
+            .group_by(KbFaqMiss.faq_id, KbFaqMiss.language)
         )
-        for faq in faqs
-    ]
+    ).all()
+    misses: dict[tuple[int, str], int] = {
+        (faq_id, language.value): count for faq_id, language, count in miss_rows
+    }
+
+    items: list[FaqItem] = []
+    for faq in faqs:
+        blockers = activation_blockers(faq, languages.get(faq.id, set()))
+        items.append(
+            FaqItem(
+                id=faq.id,
+                normalized_key=faq.normalized_key,
+                category=faq.category,
+                is_active=faq.is_active,
+                answer_ru=faq.answer_ru,
+                answer_ru_status=faq.answer_ru_status.value,
+                answer_kk=faq.answer_kk,
+                answer_kk_status=faq.answer_kk_status.value,
+                answer_en=faq.answer_en,
+                answer_en_status=faq.answer_en_status.value,
+                patterns=by_faq.get(faq.id, []),
+                can_activate=not blockers,
+                blockers=blockers,
+                misses_kk=misses.get((faq.id, "kk"), 0),
+                misses_en=misses.get((faq.id, "en"), 0),
+                updated_at=faq.updated_at,
+            )
+        )
+    return items
 
 
 @router.get("/faq", response_model=FaqListResponse)
@@ -420,8 +461,11 @@ async def create_faq(
 ) -> FaqItem:
     """A new entry starts inactive with an approved ru answer; kk/en
     stay absent until a human approves a translation."""
+    key = body.normalized_key or await _unique_key(
+        db, slugify_key(body.patterns_ru[0] if body.patterns_ru else body.answer_ru)
+    )
     faq = KbFaq(
-        normalized_key=body.normalized_key,
+        normalized_key=key,
         category=body.category,
         answer_ru=body.answer_ru,
         answer_ru_status=AnswerStatus.APPROVED,

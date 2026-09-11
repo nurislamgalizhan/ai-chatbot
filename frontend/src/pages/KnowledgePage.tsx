@@ -1,708 +1,890 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   activateFaq,
   addFaqPattern,
-  AnswerStatus,
   createDocument,
   createFaq,
   deleteDocument,
-  documentLog,
-  FaqEntry,
+  deleteFaq,
+  deleteFaqPattern,
+  type FaqEntry,
   getDocument,
-  KbLang,
-  languageMisses,
-  listChunks,
+  type KbDocument,
+  type KbLang,
   listDocuments,
   listFaq,
-  listTranslations,
-  reindexDocument,
   searchPreview,
-  TranslationRow,
+  type SearchResult,
+  suggestPatterns,
+  translateFaq,
   updateDocument,
+  updateFaq,
   updateFaqAnswer,
 } from "../api/kb";
 import { ApiError } from "../api/client";
+import Icon from "../components/icons";
 
-type Tab = "documents" | "faq" | "translations" | "search";
+/* The section has exactly two things in it, and the owner should be able
+ * to tell them apart without reading documentation: exact answers the
+ * bot repeats word for word, and long texts it composes answers from.
+ * Everything else (translations, phrasings, checking, indexing state)
+ * lives inside one record — it is not a section of its own. */
+type Tab = "qa" | "docs";
 
-const TABS: { key: Tab; label: string }[] = [
-  { key: "documents", label: "Документы" },
-  { key: "faq", label: "Прямые ответы (FAQ)" },
-  { key: "translations", label: "Проверка переводов" },
-  { key: "search", label: "Проверка поиска" },
+const LANGUAGES: { code: KbLang; label: string }[] = [
+  { code: "ru", label: "Русский" },
+  { code: "kk", label: "Қазақша" },
+  { code: "en", label: "English" },
 ];
 
-const INDEX_LABEL: Record<string, string> = {
-  not_indexed: "не индексируется",
-  pending: "в очереди",
-  indexed: "проиндексирован",
-  failed: "ошибка",
-};
-
-const STATUS_LABEL: Record<AnswerStatus, string> = {
-  absent: "нет",
-  machine: "черновик",
-  approved: "утверждён",
-};
-
-function statusChip(status: AnswerStatus) {
-  const cls =
-    status === "approved" ? "tag ok" : status === "machine" ? "tag warn" : "tag";
-  return <span className={cls}>{STATUS_LABEL[status]}</span>;
+/** The row title is the first Russian phrasing — shown as a sentence,
+ *  while the stored pattern keeps the exact text matching relies on. */
+function asTitle(text: string): string {
+  return text ? text[0].toUpperCase() + text.slice(1) : text;
 }
 
-/* ------------------------------ Documents ------------------------------ */
+function errorText(error: unknown): string | null {
+  if (error instanceof ApiError) return error.message;
+  return error ? "Не удалось выполнить действие" : null;
+}
 
-function DocumentsTab() {
-  const queryClient = useQueryClient();
-  const documents = useQuery({ queryKey: ["kb-docs"], queryFn: () => listDocuments() });
-  const [openId, setOpenId] = useState<number | null>(null);
-  const [draft, setDraft] = useState({ title: "", body: "", category: "" });
-  const [error, setError] = useState("");
+/* ------------------------------ shared bits ----------------------------- */
 
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ["kb-docs"] });
-    void queryClient.invalidateQueries({ queryKey: ["kb-doc", openId] });
-  };
-
-  const create = useMutation({
-    mutationFn: () =>
-      createDocument({
-        title: draft.title,
-        body: draft.body,
-        category: draft.category || null,
-      }),
-    onSuccess: () => {
-      setDraft({ title: "", body: "", category: "" });
-      setError("");
-      invalidate();
-    },
-    onError: (e) => setError(e instanceof ApiError ? e.message : "Ошибка"),
-  });
-
-  const patch = useMutation({
-    mutationFn: (args: { id: number; payload: Parameters<typeof updateDocument>[1] }) =>
-      updateDocument(args.id, args.payload),
-    onSuccess: invalidate,
-  });
-  const reindex = useMutation({ mutationFn: reindexDocument, onSuccess: invalidate });
-  const remove = useMutation({
-    mutationFn: deleteDocument,
-    onSuccess: () => {
-      setOpenId(null);
-      invalidate();
-    },
-  });
-
-  const detail = useQuery({
-    queryKey: ["kb-doc", openId],
-    queryFn: () => getDocument(openId!),
-    enabled: openId !== null,
-  });
-  const chunks = useQuery({
-    queryKey: ["kb-chunks", openId],
-    queryFn: () => listChunks(openId!),
-    enabled: openId !== null,
-  });
-  const log = useQuery({
-    queryKey: ["kb-log", openId],
-    queryFn: () => documentLog(openId!),
-    enabled: openId !== null,
-  });
-
+function Toggle({
+  checked,
+  onChange,
+  disabled,
+  title,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  disabled?: boolean;
+  title?: string;
+}) {
   return (
-    <>
-      <div className="panel">
-        <h2>Документы базы знаний</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Название</th>
-              <th>Категория</th>
-              <th>Статус</th>
-              <th>Индексация</th>
-              <th>Чанки</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {(documents.data?.items ?? []).map((doc) => (
-              <tr key={doc.id}>
-                <td>
-                  <button className="link-btn" onClick={() => setOpenId(doc.id)}>
-                    {doc.title}
-                  </button>
-                </td>
-                <td className="muted">{doc.category ?? "—"}</td>
-                <td>
-                  <select
-                    value={doc.status}
-                    onChange={(e) =>
-                      patch.mutate({
-                        id: doc.id,
-                        payload: { status: e.target.value as never },
-                      })
-                    }
-                  >
-                    <option value="draft">черновик</option>
-                    <option value="active">активен</option>
-                    <option value="archived">архив</option>
-                  </select>
-                </td>
-                <td>
-                  <span className={doc.index_state === "failed" ? "tag danger" : "tag"}>
-                    {INDEX_LABEL[doc.index_state] ?? doc.index_state}
-                  </span>
-                  {doc.index_error && (
-                    <div className="error" style={{ marginTop: 4 }}>
-                      {doc.index_error}
-                    </div>
-                  )}
-                </td>
-                <td>{doc.chunk_count}</td>
-                <td style={{ whiteSpace: "nowrap" }}>
-                  <label className="switch-inline">
-                    <input
-                      type="checkbox"
-                      checked={doc.is_searchable}
-                      onChange={(e) =>
-                        patch.mutate({
-                          id: doc.id,
-                          payload: { is_searchable: e.target.checked },
-                        })
-                      }
-                    />
-                    в поиске
-                  </label>
-                  <button onClick={() => reindex.mutate(doc.id)}>Переиндексировать</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {documents.data?.items.length === 0 && (
-          <p className="muted">
-            Документов нет. Импортируйте базу знаний командой <code>make kb-import</code>{" "}
-            или добавьте вручную ниже.
-          </p>
-        )}
-      </div>
-
-      {openId !== null && detail.data && (
-        <div className="panel">
-          <h2>{detail.data.title}</h2>
-          <label htmlFor="doc-body">Текст документа (версия {detail.data.version})</label>
-          <textarea
-            id="doc-body"
-            rows={10}
-            defaultValue={detail.data.body}
-            onBlur={(e) =>
-              e.target.value !== detail.data?.body &&
-              patch.mutate({ id: openId, payload: { body: e.target.value } })
-            }
-          />
-          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-            <button onClick={() => setOpenId(null)}>Закрыть</button>
-            <button className="danger" onClick={() => remove.mutate(openId)}>
-              Удалить
-            </button>
-          </div>
-
-          <h2 style={{ marginTop: 20 }}>Чанки ({chunks.data?.items.length ?? 0})</h2>
-          {(chunks.data?.items ?? []).map((chunk) => (
-            <div key={chunk.id} className="chunk">
-              <div className="muted">
-                #{chunk.chunk_index} · {chunk.token_count} токенов · {chunk.embedding_model}
-              </div>
-              {chunk.content}
-            </div>
-          ))}
-          {chunks.data?.items.length === 0 && (
-            <p className="muted">
-              Чанков нет: документ индексируется только когда он активен и включён в поиск.
-            </p>
-          )}
-
-          <h2 style={{ marginTop: 20 }}>Лог обработки</h2>
-          <table>
-            <tbody>
-              {(log.data?.items ?? []).map((row, i) => (
-                <tr key={i}>
-                  <td className="muted">
-                    {new Date(row.created_at).toLocaleString("ru-RU")}
-                  </td>
-                  <td>{row.step}</td>
-                  <td>{row.status}</td>
-                  <td className="muted">{row.detail}</td>
-                  <td>{row.tokens_used || ""}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <div className="panel">
-        <h2>Новый документ</h2>
-        <form
-          className="narrow"
-          onSubmit={(e) => {
-            e.preventDefault();
-            create.mutate();
-          }}
-        >
-          <label htmlFor="new-title">Название</label>
-          <input
-            id="new-title"
-            value={draft.title}
-            onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-            required
-          />
-          <label htmlFor="new-cat">Категория</label>
-          <input
-            id="new-cat"
-            placeholder="gym / rental / org…"
-            value={draft.category}
-            onChange={(e) => setDraft({ ...draft, category: e.target.value })}
-          />
-          <label htmlFor="new-body">Текст</label>
-          <textarea
-            id="new-body"
-            rows={5}
-            value={draft.body}
-            onChange={(e) => setDraft({ ...draft, body: e.target.value })}
-            required
-          />
-          <div style={{ marginTop: 14 }}>
-            <button className="primary" disabled={create.isPending}>
-              Создать черновик
-            </button>
-          </div>
-          {error && <div className="error">{error}</div>}
-        </form>
-      </div>
-    </>
+    <button
+      type="button"
+      className={checked ? "switch on" : "switch"}
+      disabled={disabled}
+      title={title}
+      aria-pressed={checked}
+      onClick={(e) => {
+        e.stopPropagation();
+        onChange(!checked);
+      }}
+    >
+      <span className="knob" />
+    </button>
   );
 }
 
-/* --------------------------------- FAQ --------------------------------- */
-
-function FaqRow({ faq }: { faq: FaqEntry }) {
-  const queryClient = useQueryClient();
-  const [patternDraft, setPatternDraft] = useState("");
-  const [patternLang, setPatternLang] = useState<KbLang>("ru");
-  const [error, setError] = useState("");
-  const invalidate = () => void queryClient.invalidateQueries({ queryKey: ["kb-faq"] });
-
-  const toggle = useMutation({
-    mutationFn: () => activateFaq(faq.id, !faq.is_active),
-    onSuccess: () => {
-      setError("");
-      invalidate();
-    },
-    onError: (e) => setError(e instanceof ApiError ? e.message : "Ошибка"),
-  });
-  const addPattern = useMutation({
-    mutationFn: () => addFaqPattern(faq.id, patternLang, patternDraft),
-    onSuccess: () => {
-      setPatternDraft("");
-      invalidate();
-    },
-    onError: (e) => setError(e instanceof ApiError ? e.message : "Ошибка"),
-  });
-
+function RowMenu({ items }: { items: { label: string; danger?: boolean; run: () => void }[] }) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="faq-card">
-      <div className="faq-head">
-        <strong>{faq.normalized_key}</strong>
-        <span className="muted">{faq.category ?? "—"}</span>
-        <span className="spacer" />
-        {faq.is_active ? (
-          <span className="tag ok">активна</span>
-        ) : (
-          <span className="tag">выключена</span>
-        )}
-        <button onClick={() => toggle.mutate()} disabled={toggle.isPending}>
-          {faq.is_active ? "Выключить" : "Включить"}
-        </button>
-      </div>
-      <table>
-        <tbody>
-          {(["ru", "kk", "en"] as KbLang[]).map((lang) => (
-            <tr key={lang}>
-              <td style={{ width: 40 }}>
-                <strong>{lang}</strong>
-              </td>
-              <td>{statusChip(faq[`answer_${lang}_status`] as AnswerStatus)}</td>
-              <td className="muted">
-                {faq[`answer_${lang}`] ?? <em>нет текста</em>}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div className="faq-patterns">
-        {faq.patterns.map((p) => (
-          <span key={p.id} className="tag">
-            {p.language}: {p.pattern}
-          </span>
-        ))}
-      </div>
-      <form
-        className="faq-pattern-form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (patternDraft.trim()) addPattern.mutate();
-        }}
-      >
-        <select
-          value={patternLang}
-          onChange={(e) => setPatternLang(e.target.value as KbLang)}
-        >
-          <option value="ru">ru</option>
-          <option value="kk">kk</option>
-          <option value="en">en</option>
-        </select>
-        <input
-          placeholder="+ формулировка вопроса"
-          value={patternDraft}
-          onChange={(e) => setPatternDraft(e.target.value)}
-        />
-      </form>
-      {error && <div className="error">{error}</div>}
+    <div className="row-menu" onClick={(e) => e.stopPropagation()}>
+      <button type="button" className="icon-btn" onClick={() => setOpen((v) => !v)} title="Ещё">
+        ⋮
+      </button>
+      {open && (
+        <>
+          <div className="menu-backdrop" onClick={() => setOpen(false)} />
+          <div className="menu">
+            {items.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                className={item.danger ? "danger" : ""}
+                onClick={() => {
+                  setOpen(false);
+                  item.run();
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
-function FaqTab() {
+/** Paid actions always say so — the same rule as the sandbox and limits. */
+function AiButton({
+  label,
+  onClick,
+  busy,
+}: {
+  label: string;
+  onClick: () => void;
+  busy?: boolean;
+}) {
+  return (
+    <button type="button" className="ai-btn" onClick={onClick} disabled={busy}>
+      <Icon name="sparkle" size={15} /> {busy ? "Готовлю…" : label}
+    </button>
+  );
+}
+
+/* ------------------------------ FAQ drawer ------------------------------ */
+
+const STATUS_NOTE: Record<string, { text: string; tone: string }> = {
+  absent: {
+    text: "Перевода нет. Если клиент напишет на этом языке, отвечать будет ИИ — дольше и платно.",
+    tone: "muted",
+  },
+  machine: {
+    text: "Черновик перевода. Клиент его НЕ получит, пока вы не нажмёте «Утвердить».",
+    tone: "warn",
+  },
+  approved: { text: "Утверждено — бот отвечает этим текстом.", tone: "ok" },
+};
+
+function FaqDrawer({ entry, onClose }: { entry: FaqEntry; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [lang, setLang] = useState<KbLang>("ru");
+  const [text, setText] = useState("");
+  const [phrase, setPhrase] = useState("");
+  const [note, setNote] = useState<string | null>(null);
+
+  const answers: Record<KbLang, string | null> = {
+    ru: entry.answer_ru,
+    kk: entry.answer_kk,
+    en: entry.answer_en,
+  };
+  const statuses: Record<KbLang, string> = {
+    ru: entry.answer_ru_status,
+    kk: entry.answer_kk_status,
+    en: entry.answer_en_status,
+  };
+  // Remounting on language change keeps the textarea from ever showing
+  // another language's text (the old page had exactly that bug).
+  useEffect(() => setText(answers[lang] ?? ""), [entry.id, lang, entry.updated_at]);
+
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["kb-faq"] });
+  const saveRu = useMutation({
+    mutationFn: () => updateFaq(entry.id, { answer_ru: text.trim() }),
+    onSuccess: () => {
+      setNote("Русский ответ сохранён.");
+      void refresh();
+    },
+  });
+  const saveOther = useMutation({
+    mutationFn: (status: "machine" | "approved") =>
+      updateFaqAnswer(entry.id, lang, text.trim() || null, status),
+    onSuccess: (_data, status) => {
+      setNote(status === "approved" ? "Утверждено — бот будет так отвечать." : "Черновик сохранён.");
+      void refresh();
+    },
+  });
+  const translate = useMutation({
+    mutationFn: () => translateFaq(entry.id, lang as "kk" | "en"),
+    onSuccess: (result) => {
+      setText(result.item[`answer_${lang}` as "answer_kk"] ?? "");
+      setNote(`Перевод готов (${result.cost_kzt} ₸). Проверьте и утвердите.`);
+      void refresh();
+    },
+  });
+  const suggest = useMutation({
+    mutationFn: (language: KbLang) => suggestPatterns(entry.id, language),
+    onSuccess: (result) => {
+      setNote(`Добавлено формулировок: ${result.added} (${result.cost_kzt} ₸).`);
+      void refresh();
+    },
+  });
+  const addPhrase = useMutation({
+    mutationFn: (language: KbLang) => addFaqPattern(entry.id, language, phrase.trim()),
+    onSuccess: () => {
+      setPhrase("");
+      void refresh();
+    },
+  });
+  const dropPhrase = useMutation({
+    mutationFn: (patternId: number) => deleteFaqPattern(entry.id, patternId),
+    onSuccess: () => void refresh(),
+  });
+  const toggle = useMutation({
+    mutationFn: (value: boolean) => activateFaq(entry.id, value),
+    onSuccess: () => void refresh(),
+  });
+
+  const failure =
+    errorText(saveRu.error) ??
+    errorText(saveOther.error) ??
+    errorText(translate.error) ??
+    errorText(suggest.error) ??
+    errorText(addPhrase.error) ??
+    errorText(dropPhrase.error) ??
+    errorText(toggle.error);
+  const status = statuses[lang];
+  const note2 = STATUS_NOTE[status];
+  const phrases = entry.patterns.filter((p) => p.language === lang);
+
+  return (
+    <div className="drawer">
+      <header className="drawer-head">
+        <button type="button" className="icon-btn" onClick={onClose} title="Закрыть">
+          ‹
+        </button>
+        <h2>
+          {asTitle(
+            entry.patterns.find((p) => p.language === "ru")?.pattern ?? entry.normalized_key,
+          )}
+        </h2>
+        <div className="switch-card">
+          <span>Использовать</span>
+          <Toggle
+            checked={entry.is_active}
+            disabled={!entry.can_activate && !entry.is_active}
+            title={entry.can_activate ? "" : entry.blockers.join(", ")}
+            onChange={(v) => toggle.mutate(v)}
+          />
+        </div>
+      </header>
+
+      {!entry.can_activate && (
+        <div className="readiness">
+          <strong>Чтобы бот отвечал этой записью, не хватает:</strong>
+          <ul>
+            {entry.blockers.map((b) => (
+              <li key={b}>{b}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="drawer-body">
+        <section>
+          <h3>Ответ</h3>
+          <div className="segmented">
+            {LANGUAGES.map((l) => (
+              <button
+                key={l.code}
+                type="button"
+                className={lang === l.code ? "active" : ""}
+                onClick={() => setLang(l.code)}
+              >
+                {l.label}
+                {statuses[l.code] === "approved" && <span className="dot ok" />}
+                {statuses[l.code] === "machine" && <span className="dot warn" />}
+              </button>
+            ))}
+          </div>
+
+          {lang !== "ru" && (
+            <div className={`plaque ${note2.tone === "ok" ? "ok-plaque" : note2.tone}`}>
+              {note2.text}
+            </div>
+          )}
+          {lang === "kk" && entry.misses_kk > 0 && (
+            <p className="muted">
+              На казахском спрашивали {entry.misses_kk} раз — перевод здесь нужнее всего.
+            </p>
+          )}
+
+          <textarea
+            rows={5}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={
+              lang === "ru"
+                ? "Что бот ответит клиенту слово в слово"
+                : "Перевод ответа или нажмите «Перевести»"
+            }
+          />
+          <div className="actions-row">
+            {lang === "ru" ? (
+              <button
+                className="primary"
+                disabled={saveRu.isPending || !text.trim()}
+                onClick={() => saveRu.mutate()}
+              >
+                Сохранить ответ
+              </button>
+            ) : (
+              <>
+                <AiButton
+                  label="Перевести с русского"
+                  busy={translate.isPending}
+                  onClick={() => translate.mutate()}
+                />
+                <button
+                  disabled={saveOther.isPending || !text.trim()}
+                  onClick={() => saveOther.mutate("machine")}
+                >
+                  Сохранить черновик
+                </button>
+                <button
+                  className="primary"
+                  disabled={saveOther.isPending || !text.trim()}
+                  onClick={() => saveOther.mutate("approved")}
+                >
+                  Утвердить
+                </button>
+              </>
+            )}
+          </div>
+        </section>
+
+        <section>
+          <div className="section-head">
+            <h3>Как ещё спросят ({LANGUAGES.find((l) => l.code === lang)?.label})</h3>
+            <AiButton
+              label="Подобрать формулировки"
+              busy={suggest.isPending}
+              onClick={() => suggest.mutate(lang)}
+            />
+          </div>
+          <p className="muted">
+            Бот отвечает этой записью, только если клиент напишет похоже. Чем больше живых
+            формулировок, тем чаще срабатывает точный ответ вместо ИИ.
+          </p>
+          <div className="chips">
+            {phrases.map((p) => (
+              <span key={p.id} className="chip removable">
+                {p.pattern}
+                <button
+                  type="button"
+                  title="Удалить формулировку"
+                  onClick={() => dropPhrase.mutate(p.id)}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            {phrases.length === 0 && <span className="muted">Пока ни одной.</span>}
+          </div>
+          <form
+            className="inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (phrase.trim()) addPhrase.mutate(lang);
+            }}
+          >
+            <input
+              value={phrase}
+              onChange={(e) => setPhrase(e.target.value)}
+              placeholder="Например: где вы находитесь"
+            />
+            <button disabled={!phrase.trim() || addPhrase.isPending}>Добавить</button>
+          </form>
+        </section>
+
+        {note && <div className="plaque ok-plaque">{note}</div>}
+        {failure && <div className="error">{failure}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------- QA tab --------------------------------- */
+
+function QaTab({ openId, onOpen }: { openId: number | null; onOpen: (id: number | null) => void }) {
   const queryClient = useQueryClient();
   const faq = useQuery({ queryKey: ["kb-faq"], queryFn: listFaq });
-  const [draft, setDraft] = useState({
-    key: "",
-    category: "",
-    answer: "",
-    ru: "",
-    kk: "",
-  });
-  const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
 
   const create = useMutation({
     mutationFn: () =>
       createFaq({
-        normalized_key: draft.key,
-        category: draft.category || null,
-        answer_ru: draft.answer,
-        patterns_ru: draft.ru.split("\n").map((s) => s.trim()).filter(Boolean),
-        patterns_kk: draft.kk.split("\n").map((s) => s.trim()).filter(Boolean),
+        category: null,
+        answer_ru: answer.trim(),
+        patterns_ru: [question.trim()],
+        patterns_kk: [],
       }),
+    onSuccess: (created) => {
+      setCreating(false);
+      setQuestion("");
+      setAnswer("");
+      void queryClient.invalidateQueries({ queryKey: ["kb-faq"] });
+      onOpen(created.id);
+    },
+  });
+  const remove = useMutation({
+    mutationFn: deleteFaq,
     onSuccess: () => {
-      setDraft({ key: "", category: "", answer: "", ru: "", kk: "" });
-      setError("");
+      onOpen(null);
       void queryClient.invalidateQueries({ queryKey: ["kb-faq"] });
     },
-    onError: (e) => setError(e instanceof ApiError ? e.message : "Ошибка"),
   });
+  const toggle = useMutation({
+    mutationFn: ({ id, value }: { id: number; value: boolean }) => activateFaq(id, value),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["kb-faq"] }),
+  });
+
+  const items = faq.data?.items ?? [];
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return items;
+    return items.filter((entry) =>
+      [entry.answer_ru ?? "", ...entry.patterns.map((p) => p.pattern)]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [items, query]);
+  const opened = items.find((i) => i.id === openId) ?? null;
+
+  if (faq.isPending) return <p className="muted">Загрузка…</p>;
+  if (faq.isError)
+    return (
+      <div className="error">
+        Не удалось загрузить записи.{" "}
+        <button onClick={() => void faq.refetch()}>Повторить</button>
+      </div>
+    );
 
   return (
     <>
-      <div className="panel">
-        <h2>Прямые ответы</h2>
-        <p className="muted">
-          Отвечают без обращения к модели. Сюда попадает только то, что меняется реже
-          раза в год: адрес, телефоны, график, как добраться. Цены, наличие мест и
-          акции — только через документы и RAG.
-        </p>
-        {(faq.data?.items ?? []).map((entry) => (
-          <FaqRow key={entry.id} faq={entry} />
-        ))}
-        {faq.data?.items.length === 0 && <p className="muted">Записей пока нет.</p>}
+      <div className="hint-row">
+        <Icon name="info" size={15} />
+        Точные пары «вопрос клиента — ответ». Бот отдаёт их дословно, не обращаясь к ИИ:
+        мгновенно, предсказуемо и бесплатно. Сюда — адрес, часы работы, телефоны.
       </div>
 
-      <div className="panel">
-        <h2>Новая запись</h2>
+      <div className="toolbar">
+        <button className="primary" onClick={() => setCreating(true)}>
+          + Добавить
+        </button>
+        <div className="search-row">
+          <Icon name="search" size={15} className="search-icon" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Найти запись…"
+          />
+        </div>
+      </div>
+
+      {creating && (
         <form
-          className="narrow"
+          className="create-card"
           onSubmit={(e) => {
             e.preventDefault();
-            create.mutate();
+            if (question.trim() && answer.trim()) create.mutate();
           }}
         >
-          <label htmlFor="faq-key">Ключ (латиницей)</label>
-          <input
-            id="faq-key"
-            placeholder="address"
-            value={draft.key}
-            onChange={(e) => setDraft({ ...draft, key: e.target.value })}
-            required
-          />
-          <label htmlFor="faq-cat">Категория</label>
-          <input
-            id="faq-cat"
-            value={draft.category}
-            onChange={(e) => setDraft({ ...draft, category: e.target.value })}
-          />
-          <label htmlFor="faq-answer">Ответ на русском (источник истины)</label>
-          <textarea
-            id="faq-answer"
-            rows={3}
-            value={draft.answer}
-            onChange={(e) => setDraft({ ...draft, answer: e.target.value })}
-            required
-          />
-          <label htmlFor="faq-ru">Формулировки на русском (по одной в строке)</label>
-          <textarea
-            id="faq-ru"
-            rows={3}
-            value={draft.ru}
-            onChange={(e) => setDraft({ ...draft, ru: e.target.value })}
-            required
-          />
-          <label htmlFor="faq-kk">Формулировки на казахском (обязательны)</label>
-          <textarea
-            id="faq-kk"
-            rows={3}
-            value={draft.kk}
-            onChange={(e) => setDraft({ ...draft, kk: e.target.value })}
-            required
-          />
-          <div style={{ marginTop: 14 }}>
+          <label>
+            <span>Как спрашивает клиент</span>
+            <input
+              autoFocus
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              placeholder="Где вы находитесь?"
+            />
+          </label>
+          <label>
+            <span>Что ответить</span>
+            <textarea
+              rows={3}
+              value={answer}
+              onChange={(e) => setAnswer(e.target.value)}
+              placeholder="Мы находимся по адресу…"
+            />
+          </label>
+          {errorText(create.error) && <div className="error">{errorText(create.error)}</div>}
+          <div className="actions-row">
+            <button type="button" onClick={() => setCreating(false)}>
+              Отменить
+            </button>
             <button className="primary" disabled={create.isPending}>
               Создать
             </button>
           </div>
-          {error && <div className="error">{error}</div>}
+          <p className="muted">
+            Запись создаётся выключенной. Внутри добавите казахский — и её можно включить.
+          </p>
         </form>
+      )}
+
+      <div className="list">
+        {filtered.map((entry) => {
+          const title = asTitle(
+            entry.patterns.find((p) => p.language === "ru")?.pattern ?? entry.normalized_key,
+          );
+          return (
+            <div key={entry.id} className="list-row" onClick={() => onOpen(entry.id)}>
+              <div className="list-main">
+                <strong>{title}</strong>
+                <span className="muted">{(entry.answer_ru ?? "").slice(0, 90)}</span>
+              </div>
+              {!entry.can_activate && <span className="chip warn">{entry.blockers[0]}</span>}
+              {entry.misses_kk > 0 && (
+                <span className="chip">спрашивали на казахском · {entry.misses_kk}</span>
+              )}
+              <Toggle
+                checked={entry.is_active}
+                disabled={!entry.can_activate && !entry.is_active}
+                title={entry.can_activate ? "Бот использует эту запись" : entry.blockers.join(", ")}
+                onChange={(value) => toggle.mutate({ id: entry.id, value })}
+              />
+              <RowMenu
+                items={[
+                  { label: "Открыть", run: () => onOpen(entry.id) },
+                  {
+                    label: "Удалить",
+                    danger: true,
+                    run: () => {
+                      if (confirm(`Удалить запись «${title}»? Это необратимо.`))
+                        remove.mutate(entry.id);
+                    },
+                  },
+                ]}
+              />
+            </div>
+          );
+        })}
+        {filtered.length === 0 && (
+          <p className="empty">
+            {query ? "Ничего не найдено." : "Записей пока нет. Нажмите «Добавить»."}
+          </p>
+        )}
       </div>
+
+      {opened && <FaqDrawer entry={opened} onClose={() => onOpen(null)} />}
     </>
   );
 }
 
-/* --------------------------- Translations --------------------------- */
+/* ------------------------------ docs tab -------------------------------- */
 
-function TranslationRowCard({ row }: { row: TranslationRow }) {
+const DOC_STATE: Record<string, { label: string; tone: string }> = {
+  indexed: { label: "Бот это знает", tone: "ok" },
+  pending: { label: "Готовится, обычно 1–2 минуты", tone: "warn" },
+  not_indexed: { label: "Бот не использует", tone: "muted" },
+  failed: { label: "Не получилось прочитать", tone: "danger" },
+};
+
+function DocDrawer({ id, onClose }: { id: number; onClose: () => void }) {
   const queryClient = useQueryClient();
-  const [text, setText] = useState(row.draft ?? "");
-  const [error, setError] = useState("");
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ["kb-translations"] });
-    void queryClient.invalidateQueries({ queryKey: ["kb-faq"] });
-  };
+  const doc = useQuery({ queryKey: ["kb-doc", id], queryFn: () => getDocument(id) });
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (doc.data && !loaded) {
+      setTitle(doc.data.title);
+      setBody(doc.data.body);
+      setLoaded(true);
+    }
+  }, [doc.data, loaded]);
+
   const save = useMutation({
-    mutationFn: (status: AnswerStatus) =>
-      updateFaqAnswer(row.faq_id, row.language, status === "absent" ? null : text, status),
-    onSuccess: invalidate,
-    onError: (e) => setError(e instanceof ApiError ? e.message : "Ошибка"),
+    mutationFn: () => updateDocument(id, { title: title.trim(), body }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["kb-docs"] });
+      void queryClient.invalidateQueries({ queryKey: ["kb-doc", id] });
+    },
   });
 
+  if (!doc.data) return <div className="drawer">Загрузка…</div>;
+  const dirty = title !== doc.data.title || body !== doc.data.body;
+  const state = DOC_STATE[doc.data.index_state] ?? DOC_STATE.not_indexed;
+
   return (
-    <div className="translation-row">
-      <div className="translation-cell">
-        <div className="muted">
-          {row.normalized_key} · ru (источник)
-          {row.miss_count > 0 && (
-            <span className="tag warn" style={{ marginLeft: 8 }}>
-              промахов: {row.miss_count}
-            </span>
-          )}
-        </div>
-        <div className="source-text">{row.source_ru}</div>
-      </div>
-      <div className="translation-cell">
-        <div className="muted">
-          {row.language} · {statusChip(row.status)}
-        </div>
-        <textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} />
-        <div className="translation-actions">
-          <button
-            className="primary"
-            disabled={save.isPending || !text.trim()}
-            onClick={() => save.mutate("approved")}
-          >
-            Утвердить
-          </button>
-          <button disabled={save.isPending} onClick={() => save.mutate("machine")}>
-            Сохранить как черновик
-          </button>
-          <button
-            className="danger"
-            disabled={save.isPending}
-            onClick={() => save.mutate("absent")}
-          >
-            Удалить черновик
+    <div className="drawer">
+      <header className="drawer-head">
+        <button type="button" className="icon-btn" onClick={onClose} title="Закрыть">
+          ‹
+        </button>
+        <h2>{doc.data.title}</h2>
+      </header>
+      <div className="drawer-body">
+        <label>
+          <span>Название</span>
+          <input value={title} onChange={(e) => setTitle(e.target.value)} />
+        </label>
+        <label>
+          <span>Текст, из которого бот составляет ответ</span>
+          <textarea rows={16} value={body} onChange={(e) => setBody(e.target.value)} />
+        </label>
+        <p className={`muted ${state.tone}`}>{state.label}</p>
+        {doc.data.index_error && <div className="error">{doc.data.index_error}</div>}
+        {errorText(save.error) && <div className="error">{errorText(save.error)}</div>}
+        <div className="actions-row">
+          {dirty && <span className="muted">Есть несохранённые правки</span>}
+          <button className="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+            Сохранить
           </button>
         </div>
-        {error && <div className="error">{error}</div>}
       </div>
     </div>
   );
 }
 
-function TranslationsTab() {
-  const [language, setLanguage] = useState<KbLang>("kk");
-  const [status, setStatus] = useState("machine");
-  const rows = useQuery({
-    queryKey: ["kb-translations", language, status],
-    queryFn: () => listTranslations(language, status),
+function DocsTab({ openId, onOpen }: { openId: number | null; onOpen: (id: number | null) => void }) {
+  const queryClient = useQueryClient();
+  const docs = useQuery({ queryKey: ["kb-docs"], queryFn: () => listDocuments() });
+  const [query, setQuery] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["kb-docs"] });
+  const create = useMutation({
+    mutationFn: () => createDocument({ title: title.trim(), body, category: null }),
+    onSuccess: (created) => {
+      setCreating(false);
+      setTitle("");
+      setBody("");
+      void refresh();
+      onOpen(created.id);
+    },
   });
-  const misses = useQuery({ queryKey: ["kb-misses"], queryFn: languageMisses });
+  // One switch instead of two: "the bot uses this" means active AND
+  // searchable — the old pair of controls made people think it was broken.
+  const toggle = useMutation({
+    mutationFn: ({ id, value }: { id: number; value: boolean }) =>
+      updateDocument(id, { status: value ? "active" : "draft", is_searchable: value }),
+    onSuccess: () => void refresh(),
+  });
+  const remove = useMutation({
+    mutationFn: deleteDocument,
+    onSuccess: () => {
+      onOpen(null);
+      void refresh();
+    },
+  });
+
+  const items: KbDocument[] = docs.data?.items ?? [];
+  const filtered = items.filter((d) => d.title.toLowerCase().includes(query.trim().toLowerCase()));
+
+  if (docs.isPending) return <p className="muted">Загрузка…</p>;
+  if (docs.isError)
+    return (
+      <div className="error">
+        Не удалось загрузить.{" "}
+        <button onClick={() => void docs.refetch()}>Повторить</button>
+      </div>
+    );
 
   return (
     <>
-      <div className="panel">
-        <h2>Проверка переводов</h2>
-        <p className="muted">
-          Машинный черновик никогда не отдаётся клиенту — только после того, как вы
-          нажали «Утвердить». Утверждение только по одной записи: массового нет
-          намеренно.
-        </p>
-        <div className="filter-chips" style={{ marginBottom: 14 }}>
-          {(["kk", "en"] as KbLang[]).map((l) => (
-            <button
-              key={l}
-              className={language === l ? "chip-btn active" : "chip-btn"}
-              onClick={() => setLanguage(l)}
-            >
-              {l}
-            </button>
-          ))}
-          <span style={{ width: 12 }} />
-          {["machine", "absent", "approved", "all"].map((s) => (
-            <button
-              key={s}
-              className={status === s ? "chip-btn active" : "chip-btn"}
-              onClick={() => setStatus(s)}
-            >
-              {STATUS_LABEL[s as AnswerStatus] ?? "все"}
-            </button>
-          ))}
+      <div className="hint-row">
+        <Icon name="info" size={15} />
+        Тексты, из которых бот сам составляет ответ, когда точной записи нет. Сюда — цены,
+        условия, описания услуг: всё длинное и часто меняющееся.
+      </div>
+      <div className="toolbar">
+        <button className="primary" onClick={() => setCreating(true)}>
+          + Добавить
+        </button>
+        <div className="search-row">
+          <Icon name="search" size={15} className="search-icon" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Найти раздел…"
+          />
         </div>
-        {(rows.data?.items ?? []).map((row) => (
-          <TranslationRowCard key={`${row.faq_id}-${row.language}`} row={row} />
-        ))}
-        {rows.data?.items.length === 0 && <p className="muted">Записей нет.</p>}
       </div>
 
-      <div className="panel">
-        <h2>Промахи по языку</h2>
-        <p className="muted">
-          Сколько вопросов ушло в модель, потому что утверждённого ответа на языке
-          клиента не было. Это и есть список того, что переводить дальше.
-        </p>
-        <table>
-          <thead>
-            <tr>
-              <th>Язык</th>
-              <th>Запись</th>
-              <th>Категория</th>
-              <th>Промахов</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(misses.data?.items ?? []).map((row, i) => (
-              <tr key={i}>
-                <td>{row.language}</td>
-                <td>{row.normalized_key ?? "—"}</td>
-                <td className="muted">{row.category ?? "—"}</td>
-                <td>{row.misses}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {misses.data?.total === 0 && <p className="muted">Промахов пока нет.</p>}
+      {creating && (
+        <form
+          className="create-card"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (title.trim() && body.trim()) create.mutate();
+          }}
+        >
+          <label>
+            <span>Название раздела</span>
+            <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} />
+          </label>
+          <label>
+            <span>Текст</span>
+            <textarea rows={6} value={body} onChange={(e) => setBody(e.target.value)} />
+          </label>
+          {errorText(create.error) && <div className="error">{errorText(create.error)}</div>}
+          <div className="actions-row">
+            <button type="button" onClick={() => setCreating(false)}>
+              Отменить
+            </button>
+            <button className="primary" disabled={create.isPending}>
+              Создать
+            </button>
+          </div>
+        </form>
+      )}
+
+      <div className="list">
+        {filtered.map((doc) => {
+          const state = DOC_STATE[doc.index_state] ?? DOC_STATE.not_indexed;
+          return (
+            <div key={doc.id} className="list-row" onClick={() => onOpen(doc.id)}>
+              <div className="list-main">
+                <strong>{doc.title}</strong>
+                <span className={`muted ${state.tone}`}>{state.label}</span>
+              </div>
+              <Toggle
+                checked={doc.status === "active" && doc.is_searchable}
+                title="Бот использует этот текст в ответах"
+                onChange={(value) => toggle.mutate({ id: doc.id, value })}
+              />
+              <RowMenu
+                items={[
+                  { label: "Открыть", run: () => onOpen(doc.id) },
+                  {
+                    label: "Удалить",
+                    danger: true,
+                    run: () => {
+                      if (confirm(`Удалить раздел «${doc.title}»?`)) remove.mutate(doc.id);
+                    },
+                  },
+                ]}
+              />
+            </div>
+          );
+        })}
+        {filtered.length === 0 && (
+          <p className="empty">
+            {query ? "Ничего не найдено." : "Разделов пока нет. Нажмите «Добавить»."}
+          </p>
+        )}
       </div>
+
+      {openId !== null && <DocDrawer id={openId} onClose={() => onOpen(null)} />}
     </>
   );
 }
 
-/* ------------------------------- Search ------------------------------- */
+/* --------------------------- check-the-bot panel ------------------------ */
 
-function SearchTab() {
+function CheckDrawer({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState("");
-  const [submitted, setSubmitted] = useState("");
-  const result = useQuery({
-    queryKey: ["kb-search", submitted],
-    queryFn: () => searchPreview(submitted),
-    enabled: submitted.length > 0,
-  });
+  const [result, setResult] = useState<SearchResult | null>(null);
+  const run = useMutation({ mutationFn: searchPreview, onSuccess: setResult });
 
   return (
-    <div className="panel">
-      <h2>Проверка поиска</h2>
-      <p className="muted">
-        Показывает, что именно получит модель по этому вопросу. Сам ответ модели не
-        генерируется — только прямой FAQ и найденные фрагменты.
-      </p>
-      <form
-        className="narrow"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setSubmitted(query.trim());
-        }}
-      >
-        <label htmlFor="q">Вопрос клиента</label>
-        <input id="q" value={query} onChange={(e) => setQuery(e.target.value)} required />
-        <div style={{ marginTop: 12 }}>
-          <button className="primary">Проверить</button>
-        </div>
-      </form>
+    <div className="drawer narrow-drawer">
+      <header className="drawer-head">
+        <button type="button" className="icon-btn" onClick={onClose} title="Закрыть">
+          ‹
+        </button>
+        <h2>Проверить бота</h2>
+      </header>
+      <div className="drawer-body">
+        <p className="muted">
+          Напишите так, как написал бы клиент, — покажу, что бот найдёт. Сам ответ здесь не
+          сочиняется: для полного ответа есть «Песочница» в разделе «Агент».
+        </p>
+        <form
+          className="inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (query.trim()) run.mutate(query.trim());
+          }}
+        >
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Где вы находитесь?"
+          />
+          <button className="primary" disabled={run.isPending}>
+            {run.isPending ? "Ищу…" : "Проверить"}
+          </button>
+        </form>
+        {errorText(run.error) && <div className="error">{errorText(run.error)}</div>}
 
-      {result.data && (
-        <div style={{ marginTop: 18 }}>
-          <p>
-            Определён язык: <strong>{result.data.detected_language}</strong>
-          </p>
-          {result.data.faq_hit && (
-            <div className="plaque ok-plaque">
-              <strong>Прямой ответ FAQ (0 токенов):</strong> {result.data.faq_hit}
-            </div>
-          )}
-          {result.data.faq_language_miss && (
-            <div className="plaque warn">
-              Формулировка найдена, но утверждённого ответа на этом языке нет — вопрос
-              уйдёт в модель, и это записано как промах.
-            </div>
-          )}
-          <h2 style={{ marginTop: 16 }}>Фрагменты ({result.data.hits.length})</h2>
-          {result.data.hits.map((hit) => (
-            <div key={hit.chunk_id} className="chunk">
-              <div className="muted">
-                {hit.title} · релевантность {hit.score}
-              </div>
-              {hit.content}
-            </div>
-          ))}
-          {result.data.hits.length === 0 && (
+        {result && (
+          <div className="check-result">
             <p className="muted">
-              Фрагментов нет: либо ничего не прошло порог релевантности, либо не
-              настроен ключ OpenAI (тогда индексация и поиск отключены).
+              Клиент написал на языке:{" "}
+              <strong>
+                {LANGUAGES.find((l) => l.code === result.detected_language)?.label ??
+                  result.detected_language}
+              </strong>
             </p>
-          )}
-        </div>
-      )}
+            {result.faq_hit ? (
+              <div className="plaque ok-plaque">
+                <strong>Бот ответит точной записью:</strong> {result.faq_hit}
+              </div>
+            ) : (
+              <div className="plaque">
+                Точной записи нет — бот составит ответ сам
+                {result.hits.length > 0
+                  ? ", опираясь на: " + result.hits.map((h) => h.title).join(", ")
+                  : ". Подходящих разделов тоже не нашлось — вопрос уйдёт менеджеру."}
+              </div>
+            )}
+            {result.faq_language_miss && (
+              <div className="plaque warn">
+                Запись нашлась, но перевода на этот язык нет — клиент получил бы ответ от ИИ.
+                Откройте запись и нажмите «Перевести».
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
+/* -------------------------------- page ---------------------------------- */
+
 export default function KnowledgePage() {
-  const [tab, setTab] = useState<Tab>("documents");
+  const [params, setParams] = useSearchParams();
+  const tab = (params.get("tab") as Tab) === "docs" ? "docs" : "qa";
+  const openId = params.get("id") ? Number(params.get("id")) : null;
+  const checking = params.get("check") === "1";
+
+  const faq = useQuery({ queryKey: ["kb-faq"], queryFn: listFaq });
+  const docs = useQuery({ queryKey: ["kb-docs"], queryFn: () => listDocuments() });
+
+  function go(next: Partial<{ tab: Tab; id: number | null; check: boolean }>) {
+    const updated = new URLSearchParams(params);
+    if (next.tab) {
+      updated.set("tab", next.tab);
+      updated.delete("id");
+    }
+    if (next.id !== undefined) {
+      if (next.id === null) updated.delete("id");
+      else updated.set("id", String(next.id));
+    }
+    if (next.check !== undefined) {
+      if (next.check) updated.set("check", "1");
+      else updated.delete("check");
+    }
+    setParams(updated, { replace: false });
+  }
+
+  const notReady = (faq.data?.items ?? []).filter((i) => !i.is_active).length;
+  const preparing = (docs.data?.items ?? []).filter((d) => d.index_state === "pending").length;
+
   return (
-    <div className="page-narrow">
-      <div className="tabs">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            className={tab === t.key ? "tab active" : "tab"}
-            onClick={() => setTab(t.key)}
-          >
-            {t.label}
+    <div className="kb-page">
+      <section className="card">
+        <div className="tabs">
+          <button className={tab === "qa" ? "tab active" : "tab"} onClick={() => go({ tab: "qa" })}>
+            Вопрос — ответ <span className="tab-count">{faq.data?.items.length ?? 0}</span>
+            {notReady > 0 && <span className="chip">{notReady} выключены</span>}
           </button>
-        ))}
-      </div>
-      {tab === "documents" && <DocumentsTab />}
-      {tab === "faq" && <FaqTab />}
-      {tab === "translations" && <TranslationsTab />}
-      {tab === "search" && <SearchTab />}
+          <button
+            className={tab === "docs" ? "tab active" : "tab"}
+            onClick={() => go({ tab: "docs" })}
+          >
+            Справка для бота <span className="tab-count">{docs.data?.items.length ?? 0}</span>
+            {preparing > 0 && <span className="chip warn">{preparing} готовятся</span>}
+          </button>
+        </div>
+
+        {tab === "qa" ? (
+          <QaTab openId={openId} onOpen={(id) => go({ id })} />
+        ) : (
+          <DocsTab openId={openId} onOpen={(id) => go({ id })} />
+        )}
+      </section>
+
+      <button type="button" className="side-tab" onClick={() => go({ check: true })}>
+        Проверить бота
+      </button>
+      {checking && <CheckDrawer onClose={() => go({ check: false })} />}
     </div>
   );
 }

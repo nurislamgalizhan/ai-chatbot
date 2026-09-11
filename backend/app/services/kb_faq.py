@@ -120,6 +120,88 @@ def build_pattern(faq_id: int, language: KbLanguage, pattern: str) -> KbFaqPatte
     )
 
 
+_TRANSLIT = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "i",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "c",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "sch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+    "ә": "a",
+    "ғ": "g",
+    "қ": "q",
+    "ң": "n",
+    "ө": "o",
+    "ұ": "u",
+    "ү": "u",
+    "і": "i",
+    "һ": "h",
+}
+
+
+def slugify_key(text: str) -> str:
+    """A database key derived from the question.
+
+    The owner should never be asked to invent `normalized_key` — that
+    was a machine identifier leaking into the interface.
+    """
+    lowered = text.strip().casefold()
+    out: list[str] = []
+    for char in lowered:
+        if char in _TRANSLIT:
+            out.append(_TRANSLIT[char])
+        elif char.isalnum() and char.isascii():
+            out.append(char)
+        elif out and out[-1] != "-":
+            out.append("-")
+    slug = "".join(out).strip("-")[:50]
+    return slug or "faq"
+
+
+def activation_blockers(faq: KbFaq, pattern_languages: set[str]) -> list[str]:
+    """Why this entry cannot be switched on yet, in plain Russian.
+
+    The single source of truth for the rule, used both by the activate
+    endpoint and by the list the admin renders — so the panel can show a
+    checklist instead of letting the owner click and collect a 422.
+    """
+    blockers: list[str] = []
+    if faq.answer_ru_status is not AnswerStatus.APPROVED or not faq.answer_ru:
+        blockers.append("нет ответа на русском")
+    if "ru" not in pattern_languages:
+        blockers.append("не указано, как спрашивают по-русски")
+    if "kk" not in pattern_languages:
+        blockers.append("не указано, как спрашивают по-казахски")
+    return blockers
+
+
 async def missing_pattern_languages(db: AsyncSession, faq_id: int) -> list[str]:
     """ru and kk patterns are mandatory before an entry may go active."""
     rows = (

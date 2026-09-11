@@ -103,6 +103,14 @@ class FaqItem(BaseModel):
     answer_en: str | None
     answer_en_status: AnswerStatusValue
     patterns: list[FaqPatternItem]
+    # Rendered as a readiness checklist: the owner sees what is missing
+    # instead of clicking "on" and collecting a 422.
+    can_activate: bool = True
+    blockers: list[str] = Field(default_factory=list)
+    # How often clients asked in that language and got no approved
+    # answer — the honest priority for what to translate next.
+    misses_kk: int = 0
+    misses_en: int = 0
     updated_at: datetime
 
 
@@ -113,11 +121,18 @@ class FaqListResponse(BaseModel):
 class FaqCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    normalized_key: str = Field(min_length=1, max_length=60, pattern=r"^[a-z0-9_-]+$")
+    # Optional: the key is a database identifier, not something an owner
+    # should invent. Generated from the question when omitted.
+    normalized_key: str | None = Field(
+        default=None, min_length=1, max_length=60, pattern=r"^[a-z0-9_-]+$"
+    )
     category: str | None = Field(default=None, max_length=60)
     answer_ru: str = Field(min_length=1, max_length=4000)
     patterns_ru: list[str] = Field(min_length=1, max_length=20)
-    patterns_kk: list[str] = Field(min_length=1, max_length=20)
+    # Kazakh phrasings are mandatory before the entry may be switched ON
+    # (activation_blockers enforces it) — but requiring them up front
+    # made the two-field "question -> answer" form impossible.
+    patterns_kk: list[str] = Field(default_factory=list, max_length=20)
     patterns_en: list[str] = Field(default_factory=list, max_length=20)
 
 

@@ -1381,3 +1381,432 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+
+/* ======================= knowledge base (Savvi-style) ======================
+ * One white card, sub-tabs with counters, a toolbar whose widest element
+ * is the search field, rows instead of tables, and every detail of a
+ * record inside a right-hand drawer. Mirrors docs/ui-reference/img/
+ * agent-kb-qa.png and kb-record-editor.png.
+ * ========================================================================= */
+
+.kb-page {
+  max-width: 1280px;
+}
+
+.kb-page .tabs {
+  gap: 24px;
+  margin-bottom: 4px;
+}
+
+.tab-count {
+  color: var(--text-dim);
+  font-weight: 500;
+  margin-left: 6px;
+}
+
+/* The only explanation of what a section IS — always visible, never a
+ * tooltip: the owner must not have to guess the difference between an
+ * exact answer and reference text. */
+.hint-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 0 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+
+.hint-row svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.toolbar .search-row {
+  flex: 1;
+}
+
+/* Paid AI actions: outlined, never the primary button — the owner should
+ * notice they are spending money. */
+.ai-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--surface);
+  color: #5b4bd6;
+  border: 1.5px solid #c9c2f5;
+  border-radius: var(--radius-s);
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ai-btn:hover:not(:disabled) {
+  background: #f5f3ff;
+}
+
+.ai-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  padding: 6px 9px;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* ------------------------------- rows ---------------------------------- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface-2);
+  border-radius: var(--radius-m);
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.list-row:hover {
+  background: var(--surface-3);
+}
+
+.list-main {
+  flex: 1;
+  min-width: 0; /* lets long text ellipsize instead of pushing controls out */
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.list-main strong {
+  font-size: 14px;
+}
+
+.list-main span {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switch {
+  flex: none;
+  width: 42px;
+  height: 24px;
+  border-radius: var(--radius-pill);
+  border: none;
+  background: var(--surface-3);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.switch .knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(22, 32, 46, 0.25);
+  transition: transform 0.15s;
+}
+
+.switch.on {
+  background: var(--ok);
+}
+
+.switch.on .knob {
+  transform: translateX(18px);
+}
+
+.switch:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.row-menu {
+  position: relative;
+  flex: none;
+}
+
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+
+.menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 21;
+  min-width: 170px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  box-shadow: 0 8px 24px rgba(22, 32, 46, 0.12);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+.menu button {
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 9px 10px;
+  border-radius: var(--radius-s);
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.menu button:hover {
+  background: var(--surface-2);
+}
+
+.menu button.danger {
+  color: var(--danger);
+}
+
+/* ------------------------------ drawer ---------------------------------- */
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(1080px, 80vw);
+  background: var(--surface);
+  box-shadow: -8px 0 32px rgba(22, 32, 46, 0.14);
+  display: flex;
+  flex-direction: column;
+  z-index: 30;
+}
+
+.narrow-drawer {
+  width: min(560px, 90vw);
+}
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--border);
+}
+
+.drawer-head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 17px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switch-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface-2);
+  border-radius: var(--radius-m);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 22px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+}
+
+.drawer-body section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.drawer-body h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+/* What is missing before the record can be switched on — shown up front
+ * instead of letting the owner click and collect an error. */
+.readiness {
+  margin: 0 22px;
+  background: var(--warn-bg);
+  border-radius: var(--radius-m);
+  padding: 12px 16px;
+  font-size: 13px;
+}
+
+.readiness ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--warn);
+}
+
+/* Languages are named, never ISO codes. */
+.segmented {
+  display: inline-flex;
+  background: var(--surface-2);
+  border-radius: var(--radius-s);
+  padding: 3px;
+  gap: 3px;
+  align-self: flex-start;
+}
+
+.segmented button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 7px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.segmented button.active {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow-card);
+}
+
+.segmented .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.segmented .dot.ok {
+  background: var(--ok);
+}
+
+.segmented .dot.warn {
+  background: var(--warn);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.chip.removable {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chip.removable button {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+}
+
+.chip.removable button:hover {
+  color: var(--danger);
+}
+
+.inline-form {
+  display: flex;
+  gap: 8px;
+}
+
+.inline-form input {
+  flex: 1;
+}
+
+.create-card {
+  background: var(--surface-2);
+  border-radius: var(--radius-m);
+  padding: 16px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.create-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* Savvi's "Тестировать агента": always reachable, never a tab. */
+.side-tab {
+  position: fixed;
+  right: 0;
+  top: 45%;
+  /* vertical-rl + a 180° turn around the DEFAULT (centre) origin reads
+   * bottom-to-top and stays in place; a right-edge origin swings the
+   * button off-screen. */
+  transform: rotate(180deg);
+  writing-mode: vertical-rl;
+  background: var(--primary);
+  color: var(--text-on-primary);
+  border: none;
+  border-radius: 0 var(--radius-s) var(--radius-s) 0;
+  padding: 16px 9px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  z-index: 25;
+}
+
+.side-tab:hover {
+  background: var(--primary-hover);
+}
+
+.check-result {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
