@@ -175,11 +175,20 @@ class OpenAIChatProvider(ChatProvider):
         usage = response.usage
         prompt_details = getattr(usage, "prompt_tokens_details", None)
         completion_details = getattr(usage, "completion_tokens_details", None)
+        # completion_tokens ALREADY includes the reasoning tokens. Storing
+        # it whole and then pricing (output + reasoning) charged reasoning
+        # twice, so every answer looked more expensive than it was and the
+        # ledger drifted from reality. Keep the visible output apart from
+        # the reasoning so the two still sum to what was billed, exactly
+        # as SPEC §9.1 describes ("reasoning is billed as output and
+        # tracked in its own field").
+        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        reasoning_tokens = getattr(completion_details, "reasoning_tokens", 0) or 0
         billed = ChatUsage(
             input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             cached_input_tokens=getattr(prompt_details, "cached_tokens", 0) or 0,
-            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            reasoning_tokens=getattr(completion_details, "reasoning_tokens", 0) or 0,
+            output_tokens=max(completion_tokens - reasoning_tokens, 0),
+            reasoning_tokens=reasoning_tokens,
         )
         if not text.strip():
             # HTTP 200 with no content still costs money (a reasoning
