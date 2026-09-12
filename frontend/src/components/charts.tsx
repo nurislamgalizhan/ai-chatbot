@@ -37,7 +37,10 @@ function ticks(max: number): number[] {
 
 function formatTick(value: number): string {
   if (value >= 1000) return `${Math.round(value / 100) / 10}k`;
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  if (Number.isInteger(value)) return String(value);
+  // Money axis: 0.25 must not be drawn as "0.3" — a rounded tick makes
+  // the reader mis-measure every bar against it.
+  return value.toFixed(value < 1 ? 2 : 1);
 }
 
 /** Every Nth x label, so dates never overlap on a month-wide chart. */
@@ -263,4 +266,15 @@ export function Donut({
       </figcaption>
     </figure>
   );
+}
+
+/** Russian plural: 1 диалогу, 2 диалогам, 5 диалогам. Written here so
+ *  report captions read like a person wrote them. */
+export function plural(count: number, one: string, few: string, many: string): string {
+  const mod100 = Math.abs(count) % 100;
+  const mod10 = mod100 % 10;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
 }

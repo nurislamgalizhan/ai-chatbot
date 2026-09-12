@@ -49,6 +49,7 @@ from app.media.images import ImageError, PreparedImage, prepare_image
 from app.media.sensitive import image_is_sensitive
 from app.models import AiCall, Chat, MediaJob, Message, SystemEvent
 from app.models.enums import (
+    AnswerSource,
     AttentionReason,
     CallType,
     KbLanguage,
@@ -879,6 +880,7 @@ class MediaProcessor:
                     body=reply.text,
                     state=MsgState.GENERATED,
                     correlation_id=correlation_id,
+                    answer_source=AnswerSource.SERVICE,
                 )
             )
             await db.flush()

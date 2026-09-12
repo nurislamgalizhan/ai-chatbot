@@ -5,7 +5,10 @@ import { getAiSwitch, setAiSwitch } from "../api/system";
 import Icon from "./icons";
 
 const PAGE_TITLES: Record<string, string> = {
-  "/": "Чаты",
+  "/": "Обзор",
+  "/chats": "Чаты",
+  "/costs": "Расходы",
+  "/analytics": "Аналитика",
   "/agent": "Агент",
   "/knowledge": "База знаний",
   "/limits": "Лимиты",
@@ -65,6 +68,9 @@ export default function Layout() {
       <nav className="sidebar">
         <div className="brand">Админ-панель</div>
         <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>
+          <Icon name="grid" /> Обзор
+        </NavLink>
+        <NavLink to="/chats" className={({ isActive }) => (isActive ? "active" : "")}>
           <Icon name="chat" /> Чаты
         </NavLink>
         <NavLink
@@ -84,6 +90,12 @@ export default function Layout() {
           className={({ isActive }) => (isActive ? "active" : "")}
         >
           <Icon name="wallet" /> Лимиты
+        </NavLink>
+        <NavLink to="/costs" className={({ isActive }) => (isActive ? "active" : "")}>
+          <Icon name="wallet" /> Расходы
+        </NavLink>
+        <NavLink to="/analytics" className={({ isActive }) => (isActive ? "active" : "")}>
+          <Icon name="chart" /> Аналитика
         </NavLink>
         <NavLink
           to="/account"

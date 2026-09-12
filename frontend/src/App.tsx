@@ -10,7 +10,10 @@ import { ApiError } from "./api/client";
 import Layout from "./components/Layout";
 import AccountPage from "./pages/AccountPage";
 import AgentPage from "./pages/AgentPage";
+import AnalyticsPage from "./pages/AnalyticsPage";
 import ChatsPage from "./pages/ChatsPage";
+import CostsPage from "./pages/CostsPage";
+import DashboardPage from "./pages/DashboardPage";
 import KnowledgePage from "./pages/KnowledgePage";
 import LimitsPage from "./pages/LimitsPage";
 import LoginPage from "./pages/LoginPage";
@@ -43,7 +46,10 @@ const router = createBrowserRouter([
       {
         element: <Layout />,
         children: [
-          { path: "/", element: <ChatsPage /> },
+          { path: "/", element: <DashboardPage /> },
+          { path: "/chats", element: <ChatsPage /> },
+          { path: "/costs", element: <CostsPage /> },
+          { path: "/analytics", element: <AnalyticsPage /> },
           { path: "/agent", element: <AgentPage /> },
           { path: "/knowledge", element: <KnowledgePage /> },
           { path: "/limits", element: <LimitsPage /> },

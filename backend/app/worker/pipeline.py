@@ -28,6 +28,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.ai.context_builder import HistoryTurn
 from app.models import AiCall, Chat, ChatMemory, Message, SystemEvent
 from app.models.enums import (
+    AnswerSource,
     AttentionReason,
     KbLanguage,
     LastActor,
@@ -113,6 +114,21 @@ _HISTORY_ASSISTANT_SOURCES = (MsgSource.AI, MsgSource.OPERATOR_PANEL, MsgSource.
 
 def reply_outbound_id(correlation_id: str) -> uuid.UUID:
     return uuid.uuid5(REPLY_NAMESPACE, correlation_id)
+
+
+def answer_source_of(kind: str) -> AnswerSource:
+    """Map a generation outcome to what the reports count.
+
+    Everything that is not a model answer, an FAQ hit or a cache hit is
+    a service message (a refusal, a handoff, a file acknowledgement).
+    """
+    if kind == "model":
+        return AnswerSource.MODEL
+    if kind == "faq":
+        return AnswerSource.FAQ
+    if kind == "cache":
+        return AnswerSource.CACHE
+    return AnswerSource.SERVICE
 
 
 def message_text(message: Message) -> str:
@@ -467,7 +483,11 @@ class AiPipeline:
             if outcome.text is not None:
                 # Invariant 3: GENERATED (with text) BEFORE any send.
                 reply_id = await self._insert_reply(
-                    db, claim.chat_id, claim.correlation_id, outcome.text
+                    db,
+                    claim.chat_id,
+                    claim.correlation_id,
+                    outcome.text,
+                    answer_source_of(outcome.kind),
                 )
                 await enqueue_text(
                     db,
@@ -485,6 +505,11 @@ class AiPipeline:
                 for message in messages:
                     message.state = terminal
                     message.next_attempt_at = None
+                    # Why the bot answered THIS way: without it a refusal
+                    # and a real answer look identical in the reports, and
+                    # "which limit stopped us" is lost entirely.
+                    if outcome.error_code and outcome.kind != "model":
+                        message.error_code = outcome.error_code
                 chat.last_actor = LastActor.AI
                 chat.last_message_at = now
                 if outcome.paid:
@@ -546,7 +571,12 @@ class AiPipeline:
         return self._deps.settings.retry_max_attempts
 
     async def _insert_reply(
-        self, db: AsyncSession, chat_id: int, correlation_id: str, text: str
+        self,
+        db: AsyncSession,
+        chat_id: int,
+        correlation_id: str,
+        text: str,
+        source: AnswerSource,
     ) -> int | None:
         outbound_id = reply_outbound_id(correlation_id)
         stmt = (
@@ -559,6 +589,9 @@ class AiPipeline:
                 body=text,
                 state=MsgState.GENERATED,
                 correlation_id=correlation_id,
+                # The only record that a free answer happened: FAQ and
+                # cache hits never reach ai_calls (nothing was paid).
+                answer_source=source,
             )
             .on_conflict_do_nothing(
                 index_elements=["outbound_message_id"],
@@ -619,7 +652,9 @@ class AiPipeline:
             style=ack.style,
         )
         async with self._deps.sessionmaker() as db:
-            reply_id = await self._insert_reply(db, ack.chat_id, ack.correlation_id, reply.text)
+            reply_id = await self._insert_reply(
+                db, ack.chat_id, ack.correlation_id, reply.text, AnswerSource.SERVICE
+            )
             if reply_id is not None:
                 await enqueue_text(
                     db,

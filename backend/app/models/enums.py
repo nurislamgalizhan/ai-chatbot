@@ -103,6 +103,22 @@ class CallType(StrEnum):
     VISION = "vision"
 
 
+class AnswerSource(StrEnum):
+    """How an outgoing AI answer was produced.
+
+    The only record that a FREE answer happened: FAQ and cache hits
+    return before any ai_calls row exists, so without this they could
+    not be counted at all.
+    """
+
+    MODEL = "model"
+    FAQ = "faq"
+    CACHE = "cache"
+    #: A refusal, handoff or file acknowledgement composed by the model
+    #: (or the built-in safety net when it could not be called).
+    SERVICE = "service"
+
+
 class MediaJobState(StrEnum):
     """Lifecycle of one media file's pre-processing (phase 7).
 

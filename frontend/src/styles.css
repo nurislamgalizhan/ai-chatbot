@@ -1921,3 +1921,100 @@ textarea {
   font-size: 12px;
   color: var(--text-dim);
 }
+
+/* ============================ reports (phase 8) ========================== */
+
+.report-page {
+  max-width: 1100px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.report-page .toolbar .spacer {
+  flex: 1;
+}
+
+.btn-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 13px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.btn-link:hover {
+  background: var(--surface-2);
+}
+
+.metric .value.warn {
+  color: var(--warn);
+}
+
+.metric .value.danger {
+  color: var(--danger);
+}
+
+.budget-bar {
+  margin-top: 16px;
+}
+
+.budget-bar .track {
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.budget-bar .fill {
+  height: 100%;
+  background: var(--ok);
+  transition: width 0.25s;
+}
+
+.budget-bar .fill.warn {
+  background: var(--warn);
+}
+
+.budget-bar .fill.danger {
+  background: var(--danger);
+}
+
+.budget-bar p {
+  margin-top: 8px;
+}
+
+/* Wide token tables scroll inside their card instead of stretching it. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+/* The "what is deliberately missing" card: present, but visibly not a
+ * metric — it explains an absence. */
+.card.subdued {
+  background: var(--surface-2);
+  box-shadow: none;
+}
+
+.card.subdued h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.card.subdued ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}

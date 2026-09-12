@@ -85,6 +85,29 @@ const PATHS: Record<string, React.ReactNode> = {
       <line x1="12" y1="8" x2="12.01" y2="8" />
     </>
   ),
+  grid: (
+    <>
+      <rect x="3" y="3" width="7" height="7" rx="1.5" />
+      <rect x="14" y="3" width="7" height="7" rx="1.5" />
+      <rect x="3" y="14" width="7" height="7" rx="1.5" />
+      <rect x="14" y="14" width="7" height="7" rx="1.5" />
+    </>
+  ),
+  chart: (
+    <>
+      <line x1="4" y1="20" x2="20" y2="20" />
+      <rect x="6" y="11" width="3.4" height="7" rx="1" />
+      <rect x="11" y="6" width="3.4" height="12" rx="1" />
+      <rect x="16" y="14" width="3.4" height="4" rx="1" />
+    </>
+  ),
+  download: (
+    <>
+      <path d="M12 3v12" />
+      <path d="M7 11l5 5 5-5" />
+      <path d="M4 20h16" />
+    </>
+  ),
   sparkle: (
     <>
       <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />

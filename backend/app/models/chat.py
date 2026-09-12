@@ -21,6 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 from app.models.enums import (
+    AnswerSource,
     AttentionReason,
     ChatMode,
     LastActor,
@@ -122,6 +123,9 @@ class Message(Base):
     error_code: Mapped[str | None] = mapped_column(Text)
     error_detail: Mapped[str | None] = mapped_column(Text)
     correlation_id: Mapped[str | None] = mapped_column(Text)
+    # How an AI answer was produced (NULL for everything else): the only
+    # trace a free FAQ/cache answer leaves behind.
+    answer_source: Mapped[AnswerSource | None] = mapped_column(_enum(AnswerSource, "answer_source"))
     delivery_status: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     sent_at: Mapped[datetime | None]
