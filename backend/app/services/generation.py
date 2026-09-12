@@ -33,6 +33,7 @@ from app.services.circuit_breaker import CircuitBreaker
 from app.services.kb_faq import match_faq
 from app.services.kb_search import search_chunks
 from app.services.pricing import (
+    PriceSheet,
     PricingError,
     Usage,
     compute_cost_usd,
@@ -127,6 +128,53 @@ def safety_net_text(language: KbLanguage) -> str:
     return _SAFETY_NET.get(language.value, _SAFETY_NET["ru"])
 
 
+async def _settle_failed_call(
+    deps: GenerationDeps,
+    *,
+    exc: ChatError,
+    prices: PriceSheet,
+    rate: Decimal,
+    model: str,
+    correlation_id: str,
+    chat_id: int | None,
+    sub_correlation: str,
+    error_code: str,
+) -> Decimal:
+    """Account for a call that failed AFTER being billed, else release.
+
+    `ChatError.usage` is set only when the request reached the model and
+    was charged (an empty completion). Dropping that spend would make
+    every limit blind to it.
+    """
+    if exc.usage is None:
+        await budget.release(deps.sessionmaker, sub_correlation=sub_correlation)
+        return Decimal(0)
+    cost = compute_cost_usd(
+        prices,
+        Usage(
+            input_tokens=exc.usage.input_tokens,
+            cached_input_tokens=exc.usage.cached_input_tokens,
+            output_tokens=exc.usage.output_tokens,
+            reasoning_tokens=exc.usage.reasoning_tokens,
+        ),
+    )
+    await _record_ai_call(
+        deps,
+        inp=GenerationInput(
+            correlation_id=correlation_id, question="", language=KbLanguage.RU, chat_id=chat_id
+        ),
+        call_type=CallType.CHAT,
+        model=model,
+        usage=exc.usage,
+        cost_usd=cost,
+        cost_kzt=usd_to_kzt(cost, rate),
+        status="error",
+        error_code=error_code,
+    )
+    await budget.settle(deps.sessionmaker, sub_correlation=sub_correlation, actual_usd=cost)
+    return cost
+
+
 async def compose_service_reply(
     deps: GenerationDeps,
     *,
@@ -198,9 +246,22 @@ async def compose_service_reply(
             )
         )
     except ChatError as exc:
-        await budget.release(deps.sessionmaker, sub_correlation=sub_correlation)
+        # A failure that still cost money (an empty completion) is booked
+        # like any other spend; only a call that never reached the model
+        # releases its reservation untouched.
+        spent = await _settle_failed_call(
+            deps,
+            exc=exc,
+            prices=prices,
+            rate=rate,
+            model=model,
+            correlation_id=correlation_id,
+            chat_id=chat_id,
+            sub_correlation=sub_correlation,
+            error_code=f"service:{reason}",
+        )
         logger.warning("service_reply_failed", reason=reason, error=str(exc))
-        return ServiceReply(text=safety_net_text(language), generated=False)
+        return ServiceReply(text=safety_net_text(language), generated=False, cost_usd=spent)
 
     cost_usd = compute_cost_usd(
         prices,
@@ -518,12 +579,39 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
         try:
             result = await deps.chat_provider.complete(request)
         except ChatError as exc:
-            await budget.release(deps.sessionmaker, sub_correlation=sub_correlation)
+            # An empty completion still cost money: book the factual
+            # usage instead of releasing a reservation for spend that
+            # actually happened.
+            billed = exc.usage
+            failure_cost = (
+                compute_cost_usd(
+                    prices,
+                    Usage(
+                        input_tokens=billed.input_tokens,
+                        cached_input_tokens=billed.cached_input_tokens,
+                        output_tokens=billed.output_tokens,
+                        reasoning_tokens=billed.reasoning_tokens,
+                    ),
+                )
+                if billed is not None
+                else Decimal(0)
+            )
+            if billed is None:
+                await budget.release(deps.sessionmaker, sub_correlation=sub_correlation)
+            else:
+                await budget.settle(
+                    deps.sessionmaker,
+                    sub_correlation=sub_correlation,
+                    actual_usd=failure_cost,
+                )
             await _record_ai_call(
                 deps,
                 inp=inp,
                 call_type=CallType.CHAT,
                 model=model,
+                usage=billed,
+                cost_usd=failure_cost,
+                cost_kzt=usd_to_kzt(failure_cost, rate),
                 kb_chunk_ids=built.kb_chunk_ids,
                 instruction_version=instruction.version,
                 reasoning_effort=reasoning_effort,

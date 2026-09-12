@@ -767,3 +767,36 @@ async def test_orphan_job_of_a_finished_message_is_closed(media_env) -> None:
     job = await get_job(maker, message_id)
     assert job.state is MediaJobState.REFUSED
     assert job.error_code == "message_not_queued"
+
+
+async def test_refusal_reaches_the_customer_before_the_chat_is_released(
+    media_env,
+) -> None:
+    """Ordering: while the job is open the AI pipeline skips this chat,
+    so the refusal must be SENT before the job closes — otherwise an
+    answer to a later text message can overtake it."""
+    maker = media_env["maker"]
+    media_env["download"].payload = make_wav(200.0)  # too long -> refusal
+    chat_id = await make_chat(maker, media_env["instance_pk"])
+    message_id = await add_media_message(maker, chat_id)
+
+    seen_state: list[MediaJobState] = []
+    original = media_env["processor"]._send_service_reply
+
+    async def spy(job, reason):
+        async with maker() as db:
+            row = (
+                await db.execute(
+                    select(MediaJob).where(MediaJob.message_id == message_id)
+                )
+            ).scalar_one()
+            seen_state.append(row.state)
+        await original(job, reason)
+
+    media_env["processor"]._send_service_reply = spy
+    await media_env["processor"].run_once()
+
+    # The job was still open while the customer was being told.
+    assert seen_state == [MediaJobState.PROCESSING]
+    assert (await get_job(maker, message_id)).state is MediaJobState.REFUSED
+    assert len(await get_replies(maker, chat_id)) == 1

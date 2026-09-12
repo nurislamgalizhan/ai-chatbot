@@ -752,9 +752,17 @@ class MediaProcessor:
             message.state = MsgState.HANDED_TO_HUMAN
             message.error_code = error_code
             await set_attention(db, chat, AttentionReason.HANDOFF, job.correlation_id)
+            await db.commit()
+
+        # Said BEFORE the job is closed: while it is open the AI pipeline
+        # skips this chat, so the customer cannot receive an answer to a
+        # later text message before hearing about the file. A crash here
+        # is safe — the reply is idempotent by outbound id, and the lease
+        # brings the job back.
+        await self._send_service_reply(job, template)
+        async with self._deps.sessionmaker() as db:
             await self._close_job(db, job, MediaJobState.REFUSED, error_code)
             await db.commit()
-        await self._send_service_reply(job, template)
         logger.info("media_refused", message_id=job.message_id, error_code=error_code)
 
     async def _fail(self, job: _Job, error_code: str, *, retryable: bool) -> None:
@@ -766,13 +774,19 @@ class MediaProcessor:
             if job_row is None or message is None or chat is None:
                 await db.commit()
                 return
-            if job_row.state in (MediaJobState.DONE, MediaJobState.REFUSED, MediaJobState.FAILED):
-                # Already finished — the failure happened AFTER the
-                # outcome was committed (e.g. while composing the
-                # reply). Re-opening it would leave a job PENDING for a
-                # message that is no longer QUEUED, and `has_open_media_job`
-                # would then exclude this chat from the AI pipeline
-                # forever: the customer would never get another answer.
+            outcome_committed = message.state is not MsgState.QUEUED
+            if outcome_committed or job_row.state in (
+                MediaJobState.DONE,
+                MediaJobState.REFUSED,
+                MediaJobState.FAILED,
+            ):
+                # The message already has its outcome, so the failure
+                # happened afterwards (e.g. while composing the reply).
+                # Re-opening the job would leave it PENDING for a message
+                # that is no longer QUEUED, and `has_open_media_job` would
+                # then exclude this chat from the AI pipeline forever —
+                # the customer would never get another answer.
+                await self._close_job(db, job, MediaJobState.REFUSED, error_code)
                 logger.warning(
                     "media_post_commit_error", message_id=job.message_id, error_code=error_code
                 )
@@ -793,11 +807,17 @@ class MediaProcessor:
                 message.error_code = error_code
                 await set_attention(db, chat, AttentionReason.PROCESSING_ERROR, job.correlation_id)
                 terminal = True
+            if terminal:
+                # Leave the job open until the customer has been told, so
+                # the AI pipeline cannot answer this chat out of order.
+                job_row.state = MediaJobState.PROCESSING
+                job_row.lease_until = datetime.now(UTC) + _LEASE
             await db.commit()
         if terminal:
-            # Composed after the commit: the handoff must survive even if
-            # the model cannot phrase the message.
             await self._send_service_reply(job, "media")
+            async with self._deps.sessionmaker() as db:
+                await self._close_job(db, job, MediaJobState.FAILED, error_code)
+                await db.commit()
         logger.warning(
             "media_failed", message_id=job.message_id, error_code=error_code, retryable=retryable
         )

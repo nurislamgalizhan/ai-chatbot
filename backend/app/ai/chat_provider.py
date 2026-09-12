@@ -23,20 +23,27 @@ logger = structlog.get_logger(__name__)
 _RETRYABLE_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
 
 
-class ChatError(Exception):
-    """Provider failure; `retryable` drives the pipeline's backoff."""
-
-    def __init__(self, message: str, *, retryable: bool) -> None:
-        super().__init__(message)
-        self.retryable = retryable
-
-
 @dataclass(frozen=True)
 class ChatUsage:
     input_tokens: int = 0
     cached_input_tokens: int = 0
     output_tokens: int = 0
     reasoning_tokens: int = 0
+
+
+class ChatError(Exception):
+    """Provider failure; `retryable` drives the pipeline's backoff.
+
+    `usage` is set when the request REACHED the model and was billed but
+    produced nothing usable (an empty completion). Callers must still
+    record and settle that spend — money left unaccounted is money the
+    limits cannot see.
+    """
+
+    def __init__(self, message: str, *, retryable: bool, usage: ChatUsage | None = None) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.usage = usage
 
 
 @dataclass(frozen=True)
@@ -165,20 +172,24 @@ class OpenAIChatProvider(ChatProvider):
         latency_ms = int((time.monotonic() - started) * 1000)
         choice = response.choices[0] if response.choices else None
         text = (choice.message.content or "") if choice else ""
-        if not text.strip():
-            msg = "chat_failed:empty_response"
-            raise ChatError(msg, retryable=True)
         usage = response.usage
         prompt_details = getattr(usage, "prompt_tokens_details", None)
         completion_details = getattr(usage, "completion_tokens_details", None)
+        billed = ChatUsage(
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            cached_input_tokens=getattr(prompt_details, "cached_tokens", 0) or 0,
+            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            reasoning_tokens=getattr(completion_details, "reasoning_tokens", 0) or 0,
+        )
+        if not text.strip():
+            # HTTP 200 with no content still costs money (a reasoning
+            # model can spend the whole output budget thinking), so the
+            # usage travels with the error instead of being lost.
+            msg = "chat_failed:empty_response"
+            raise ChatError(msg, retryable=True, usage=billed)
         return ChatResult(
             text=text,
-            usage=ChatUsage(
-                input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                cached_input_tokens=getattr(prompt_details, "cached_tokens", 0) or 0,
-                output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                reasoning_tokens=getattr(completion_details, "reasoning_tokens", 0) or 0,
-            ),
+            usage=billed,
             model=response.model or model,
             latency_ms=latency_ms,
         )

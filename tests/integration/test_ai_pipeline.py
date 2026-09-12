@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from app.ai.chat_provider import ChatError, FakeChatProvider, make_result
+from app.ai.chat_provider import ChatError, ChatUsage, FakeChatProvider, make_result
 from app.models import (
     AiCall,
     BudgetLedger,
@@ -939,3 +939,34 @@ async def test_image_description_is_reused_from_history(env) -> None:
     history = env["chat_provider"].requests[0].messages
     joined = " ".join(str(m.get("content", "")) for m in history)
     assert "прайс-лист тренажерного зала" in joined
+
+
+async def test_paid_but_empty_answer_is_still_accounted(env) -> None:
+    """An HTTP 200 with no content is billed anyway (a reasoning model
+    can spend the whole output budget thinking). Releasing the
+    reservation would hide that spend from every limit."""
+    maker = env["maker"]
+    env["chat_provider"].script = [
+        ChatError(
+            "chat_failed:empty_response",
+            retryable=True,
+            usage=ChatUsage(input_tokens=1000, output_tokens=300),
+        )
+    ]
+    chat_id = await make_chat(maker, env["instance_pk"])
+    await add_queued(maker, chat_id)
+
+    await env["pipeline"].run_once()
+
+    async with maker() as db:
+        calls = (await db.execute(select(AiCall))).scalars().all()
+        day = (
+            await db.execute(
+                select(BudgetLedger).where(BudgetLedger.scope == BudgetScope.GLOBAL_DAY)
+            )
+        ).scalar_one()
+    failed = [c for c in calls if c.status == "error"]
+    assert len(failed) == 1
+    assert failed[0].cost_usd > 0  # the money that actually left
+    assert day.spent_usd >= failed[0].cost_usd
+    assert day.reserved_usd == 0  # settled, not left hanging

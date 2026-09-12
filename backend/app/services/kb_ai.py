@@ -28,12 +28,13 @@ from uuid import uuid4
 
 import structlog
 
-from app.ai.chat_provider import ChatError, ChatRequest
+from app.ai.chat_provider import ChatError, ChatRequest, ChatUsage
 from app.ai.tokens import count_tokens
 from app.models import AiCall
 from app.models.enums import CallType, KbLanguage
 from app.services import budget
 from app.services.pricing import (
+    PriceSheet,
     PricingError,
     Usage,
     compute_cost_usd,
@@ -186,6 +187,50 @@ def _parse_patterns(raw: str, existing: list[str]) -> list[str]:
     return result
 
 
+async def _book_failed_call(
+    deps: GenerationDeps,
+    *,
+    usage: ChatUsage,
+    prices: PriceSheet,
+    model: str,
+    correlation_id: str,
+    sub_correlation: str,
+) -> None:
+    """Account for a paid call that returned nothing usable."""
+    cost = compute_cost_usd(
+        prices,
+        Usage(
+            input_tokens=usage.input_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            output_tokens=usage.output_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+        ),
+    )
+    async with deps.sessionmaker() as db:
+        try:
+            rate: Decimal | None = await load_usd_kzt_rate(db)
+        except PricingError:
+            rate = None
+        db.add(
+            AiCall(
+                correlation_id=correlation_id,
+                chat_id=None,
+                call_type=CallType.CHAT,
+                model=model,
+                input_tokens=usage.input_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                output_tokens=usage.output_tokens,
+                reasoning_tokens=usage.reasoning_tokens,
+                cost_usd=cost,
+                cost_kzt=usd_to_kzt(cost, rate) if rate is not None else Decimal(0),
+                status="error",
+                error_code="empty_response",
+            )
+        )
+        await db.commit()
+    await budget.settle(deps.sessionmaker, sub_correlation=sub_correlation, actual_usd=cost)
+
+
 @dataclass(frozen=True)
 class _CallResult:
     text: str
@@ -251,7 +296,19 @@ async def _paid_call(
             )
         )
     except ChatError as exc:
-        await budget.release(deps.sessionmaker, sub_correlation=sub_correlation)
+        # A billed-but-empty answer is still spend: record and settle it,
+        # otherwise the limits never see money that actually left.
+        if exc.usage is None:
+            await budget.release(deps.sessionmaker, sub_correlation=sub_correlation)
+        else:
+            await _book_failed_call(
+                deps,
+                usage=exc.usage,
+                prices=prices,
+                model=model,
+                correlation_id=sub_correlation,
+                sub_correlation=sub_correlation,
+            )
         logger.warning("kb_ai_call_failed", correlation_id=correlation_id, error=str(exc))
         msg = "Модель не ответила, попробуйте ещё раз"
         raise KbAiError(msg, retryable=exc.retryable) from exc
