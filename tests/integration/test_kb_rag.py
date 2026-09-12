@@ -18,8 +18,8 @@ from app.ai.embeddings import (
     EmbeddingResult,
     FakeEmbeddingProvider,
 )
-from app.models import KbChunk, KbDocument, KbProcessingLog
-from app.models.enums import DocStatus, KbLanguage, SourceType
+from app.models import AiCall, KbChunk, KbDocument, KbProcessingLog
+from app.models.enums import CallType, DocStatus, KbLanguage, SourceType
 from app.services.kb_indexing import index_document, process_pending_documents
 from app.services.kb_search import search_chunks
 from sqlalchemy import select
@@ -253,6 +253,60 @@ async def test_failure_after_paid_embed_costs_exactly_one_attempt(
     # The next worker pass must not touch it: nothing pending, no new pay.
     assert await process_pending_documents(maker, provider, settings_rag) == 0
     assert provider.calls == 1
+
+
+async def test_teaching_the_bot_is_recorded_as_spend(db_engine, settings_rag) -> None:
+    """Indexing pays OpenAI for embeddings. Without an ai_calls row it is
+    the one paid thing that appears in no report and in no forecast."""
+    doc_id = await make_document(db_engine, title="Секции", body="Бокс, карате.")
+    maker = async_sessionmaker(db_engine, expire_on_commit=False)
+    provider = FakeEmbeddingProvider(dimensions=DIMENSIONS)
+
+    assert await process_pending_documents(maker, provider, settings_rag) == 1
+
+    async with maker() as db:
+        calls = (
+            (
+                await db.execute(
+                    select(AiCall).where(AiCall.call_type == CallType.EMBEDDING)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(calls) == 1
+    assert calls[0].chat_id is None  # the owner's own work, not a customer answer
+    assert calls[0].input_tokens > 0
+    assert f"{doc_id}" in calls[0].correlation_id
+
+
+async def test_spend_is_recorded_even_when_indexing_fails_after_paying(
+    db_engine, settings_rag
+) -> None:
+    """The provider charged before the chunks failed to store: the money
+    left regardless, so the report must still show it."""
+    doc_id = await make_document(db_engine, title="Ломаный", body="Текст документа.")
+    maker = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    assert (
+        await process_pending_documents(maker, WrongDimensionEmbeddings(), settings_rag)
+        == 1
+    )
+
+    async with maker() as db:
+        document = await db.get(KbDocument, doc_id)
+        calls = (
+            (
+                await db.execute(
+                    select(AiCall).where(AiCall.call_type == CallType.EMBEDDING)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert document.index_state == "failed"
+    assert len(calls) == 1
+    assert calls[0].input_tokens > 0
 
 
 async def _index_with(db_engine, settings_rag, provider, doc_id: int) -> None:

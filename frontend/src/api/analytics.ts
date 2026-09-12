@@ -37,6 +37,10 @@ export interface BudgetState {
   day: BudgetPeriod | null;
   month: BudgetPeriod | null;
   forecast_date: string | null;
+  /** Everything the call journal says was paid this month. Larger than
+   *  month.spent_usd, which only counts spending that went through a
+   *  budget reservation. */
+  month_calls_usd: string;
 }
 
 export interface CostsResponse {
@@ -86,6 +90,7 @@ export interface AnalyticsResponse {
   };
   answer_sources: Record<string, number>;
   errors: { code: string; count: number }[];
+  semantic_cache_enabled: boolean;
   language_gaps: { language: string; faq_id: number | null; key: string | null; misses: number }[];
   not_measured: string[];
 }

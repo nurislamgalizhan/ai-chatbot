@@ -8,16 +8,26 @@ pile of drafts costs nothing.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import delete, select
 
 from app.ai.tokens import estimate_tokens
-from app.models import KbChunk, KbDocument, KbProcessingLog
-from app.models.enums import DocStatus
+from app.models import AiCall, KbChunk, KbDocument, KbProcessingLog
+from app.models.enums import CallType, DocStatus
 from app.services.kb_text import chunk_text
+from app.services.pricing import (
+    PricingError,
+    Usage,
+    compute_cost_usd,
+    load_price_sheet,
+    load_usd_kzt_rate,
+    usd_to_kzt,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -28,6 +38,15 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _EMBED_BATCH = 32
+
+
+@dataclass(slots=True)
+class IndexResult:
+    """What one document's indexing produced — and what it cost."""
+
+    chunks: int = 0
+    embed_tokens: int = 0
+    model: str = ""
 
 
 def is_indexable(document: KbDocument) -> bool:
@@ -49,14 +68,25 @@ async def index_document(
     document: KbDocument,
     provider: EmbeddingProvider,
     settings: Settings,
-) -> int:
-    """(Re)build the chunks of one document. Returns the chunk count."""
+    *,
+    report: IndexResult | None = None,
+) -> IndexResult:
+    """(Re)build the chunks of one document.
+
+    Returns what was built and how many embedding tokens were paid for;
+    writing that down is the caller's job (`_index_one`), because the
+    accounting row must survive a rollback of this transaction.
+
+    `report` is the same object, filled in as soon as the money is spent:
+    if storing the chunks fails afterwards, the caller still knows what
+    the provider already charged for.
+    """
     if not is_indexable(document):
         # Eligibility changed while queued: drop stale chunks and stop.
         await db.execute(delete(KbChunk).where(KbChunk.document_id == document.id))
         document.index_state = "not_indexed"
         document.indexed_at = None
-        return 0
+        return IndexResult()
 
     pieces = chunk_text(document.body, settings.chunk_tokens, settings.chunk_overlap)
     if not pieces:
@@ -71,7 +101,7 @@ async def index_document(
                 detail="документ не содержит текста для индексации",
             )
         )
-        return 0
+        return IndexResult()
 
     vectors: list[list[float]] = []
     total_tokens = 0
@@ -82,6 +112,10 @@ async def index_document(
         vectors.extend(result.vectors)
         total_tokens += result.total_tokens
         model = result.model
+        if report is not None:
+            # Paid: true from this line on, whatever happens below.
+            report.embed_tokens = total_tokens
+            report.model = model
 
     # Replace atomically inside the caller's transaction: a failed embed
     # above leaves the old chunks untouched.
@@ -124,7 +158,9 @@ async def index_document(
         chunks=len(pieces),
         tokens=total_tokens,
     )
-    return len(pieces)
+    if report is not None:
+        report.chunks = len(pieces)
+    return IndexResult(chunks=len(pieces), embed_tokens=total_tokens, model=model)
 
 
 async def process_pending_documents(
@@ -166,6 +202,7 @@ async def _index_one(
     provider: EmbeddingProvider,
     settings: Settings,
 ) -> int:
+    report = IndexResult()
     try:
         async with sessionmaker() as db:
             document = (
@@ -179,13 +216,58 @@ async def _index_one(
                 # Re-checked under lock: taken by a concurrent pass or no
                 # longer pending — nothing to do, nothing paid.
                 return 0
-            await index_document(db, document, provider, settings)
+            await index_document(db, document, provider, settings, report=report)
             await db.commit()
             return 1
     except Exception as exc:  # noqa: BLE001 — every failure must end in `failed`
         logger.exception("kb_index_failed", document_id=document_id)
         await _mark_failed(sessionmaker, document_id, exc)
         return 1
+    finally:
+        await _book_embeddings(sessionmaker, document_id, report)
+
+
+async def _book_embeddings(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    document_id: int,
+    report: IndexResult,
+) -> None:
+    """Write the embedding spend into ai_calls, in its own transaction.
+
+    Without this row, teaching the bot is the one paid thing that costs
+    the owner money and appears in no report at all — and the monthly
+    forecast, built on what the reports can see, runs slow.
+    """
+    if report.embed_tokens <= 0:
+        return
+    try:
+        async with sessionmaker() as db:
+            cost_usd = Decimal(0)
+            cost_kzt = Decimal(0)
+            try:
+                prices = await load_price_sheet(db, report.model)
+                cost_usd = compute_cost_usd(prices, Usage(input_tokens=report.embed_tokens))
+                cost_kzt = usd_to_kzt(cost_usd, await load_usd_kzt_rate(db))
+            except PricingError:
+                # No price for this embedding model yet: record the call
+                # anyway — the tokens are real even if we cannot price them.
+                logger.warning("kb_index_price_missing", model=report.model)
+            db.add(
+                AiCall(
+                    # No chat: the reports show it as the owner's own work.
+                    correlation_id=f"kbindex:doc:{document_id}",
+                    chat_id=None,
+                    call_type=CallType.EMBEDDING,
+                    model=report.model,
+                    input_tokens=report.embed_tokens,
+                    cost_usd=cost_usd,
+                    cost_kzt=cost_kzt,
+                )
+            )
+            await db.commit()
+    except Exception:
+        # Accounting must never break indexing: the log keeps the trace.
+        logger.exception("kb_index_booking_failed", document_id=document_id)
 
 
 async def _mark_failed(

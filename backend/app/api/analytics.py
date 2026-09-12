@@ -124,6 +124,7 @@ async def overview(
         answer_sources=await analytics.answer_sources(db, period),
         errors=await analytics.errors(db, period),
         language_gaps=await analytics.language_gaps(db, period),
+        semantic_cache_enabled=bool(await get_setting(db, app_settings.SEMANTIC_CACHE_ENABLED)),
         not_measured=NOT_MEASURED,
     )
 

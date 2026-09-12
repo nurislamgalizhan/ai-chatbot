@@ -433,6 +433,12 @@ class MediaProcessor:
     # ------------------------------ voice -------------------------------
 
     async def _handle_voice(self, job: _Job, data: bytes, limits: _Limits) -> None:  # noqa: PLR0911 - every early return is a refusal that costs nothing
+        provider = self._deps.transcription_provider
+        if provider is None:
+            # Gate 2 already refuses this; repeated here so nothing paid
+            # for below can depend on an assert (stripped under -O).
+            await self._refuse(job, "media_not_configured", template="media")
+            return
         try:
             duration = await asyncio.to_thread(probe_duration_seconds, data)
         except AudioError:
@@ -472,10 +478,9 @@ class MediaProcessor:
             await self._refuse(job, "already_charged", template="media")
             return
 
-        assert self._deps.transcription_provider is not None
         language = detect_language(job.caption or "")
         try:
-            result = await self._deps.transcription_provider.transcribe(
+            result = await provider.transcribe(
                 TranscriptionRequest(
                     audio=data,
                     file_name=f"voice-{job.message_id}{storage.extension_for(job.mime_type)}",
@@ -505,6 +510,12 @@ class MediaProcessor:
     # ------------------------------ image -------------------------------
 
     async def _handle_image(self, job: _Job, data: bytes, limits: _Limits) -> None:  # noqa: PLR0911 - every early return is a refusal that costs nothing
+        provider = self._deps.chat_provider
+        if provider is None:
+            # Same reason as in _handle_voice: gate 2 already refused, and
+            # an assert would vanish under -O.
+            await self._refuse(job, "media_not_configured", template="media")
+            return
         try:
             prepared = await asyncio.to_thread(prepare_image, data)
         except ImageError:
@@ -546,10 +557,9 @@ class MediaProcessor:
             await self._refuse(job, "already_charged", template="media")
             return
 
-        assert self._deps.chat_provider is not None
         language = detect_language(job.caption or "")
         try:
-            result = await self._deps.chat_provider.describe_image(
+            result = await provider.describe_image(
                 VisionRequest(
                     system=_VISION_SYSTEM,
                     instruction=_vision_instruction(language, job.caption),

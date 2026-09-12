@@ -26,6 +26,7 @@ import {
   sendMessage,
 } from "../api/chats";
 import Icon, { IconName } from "../components/icons";
+import { messageReason } from "../components/reasons";
 
 const SOURCE_LABEL: Record<string, string> = {
   customer: "Клиент",
@@ -203,6 +204,7 @@ function MessageBlock({
 }) {
   const isCustomer = message.direction === "in";
   const [showWhy, setShowWhy] = useState(false);
+  const reason = messageReason(message.error_code, message.state);
   const classes = ["msg", isCustomer ? "from-customer" : "", `src-${message.source}`]
     .filter(Boolean)
     .join(" ");
@@ -248,9 +250,7 @@ function MessageBlock({
           <strong>DRY RUN:</strong> сообщение обработано, но не отправлено
         </div>
       )}
-      {message.error_code && (
-        <div className="plaque danger">Ошибка: {message.error_code}</div>
-      )}
+      {reason && <div className={`plaque ${reason.tone}`}>{reason.text}</div>}
       {showWhy && <WhySoBlock chatId={chatId} messageId={message.id} />}
     </div>
   );

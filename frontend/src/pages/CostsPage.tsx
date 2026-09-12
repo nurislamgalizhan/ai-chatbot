@@ -11,6 +11,7 @@ const TYPE_COLORS: Record<string, string> = {
   transcription: "#22a06b",
   embedding: "#b47818",
   vision: "#8b5cf6",
+  admin: "#8a93a6",
 };
 
 const PERIODS = [
@@ -46,6 +47,7 @@ function BudgetBar({ data }: { data: CostsResponse["budget"] }) {
   const limit = Number(month.limit_usd);
   const spent = Number(month.spent_usd);
   const share = limit > 0 ? Math.min(100, Math.round((spent / limit) * 100)) : 0;
+  const byCalls = Number(data.month_calls_usd ?? 0);
   return (
     <div className="budget-bar">
       <div className="track">
@@ -64,6 +66,15 @@ function BudgetBar({ data }: { data: CostsResponse["budget"] }) {
           "Прогноз появится, когда накопится расход."
         )}
       </p>
+      {byCalls > spent + 0.000001 && (
+        <p className="muted">
+          Процент считается по тому счёту, который останавливает бота при
+          превышении лимита. По журналу вызовов за месяц потрачено чуть
+          больше — ${byCalls.toFixed(4)}: обучение базы знаний и поиск по
+          ней тратят деньги, но лимитом не ограничиваются. Прогноз даты
+          считается по этой, большей сумме.
+        </p>
+      )}
     </div>
   );
 }
@@ -97,6 +108,12 @@ export default function CostsPage() {
   const perDay = data.spend_by_day.length
     ? Number(data.total_kzt) / data.spend_by_day.length
     : 0;
+  // Sandbox runs, translations of knowledge-base answers and teaching the
+  // bot are paid by the owner's own clicks, not by answering customers.
+  const adminKzt = data.spend_by_day.reduce(
+    (sum, d) => sum + Number(d.by_call_type.admin ?? 0),
+    0,
+  );
 
   return (
     <div className="report-page">
@@ -135,6 +152,13 @@ export default function CostsPage() {
           <div className="metric">
             <span className="value">{money(perDay)}</span>
             <span className="caption">В среднем в день</span>
+          </div>
+          <div className="metric">
+            <span className="value">{money(Number(data.total_kzt) - adminKzt)}</span>
+            <span className="caption">Из них на ответы клиентам</span>
+            <span className="sub">
+              моя работа в панели: {money(adminKzt)}
+            </span>
           </div>
         </div>
 

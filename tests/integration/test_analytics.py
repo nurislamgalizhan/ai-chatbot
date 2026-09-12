@@ -231,6 +231,73 @@ async def test_top_dialogs_sum_to_the_calls(seeded) -> None:
     )  # most expensive first
 
 
+async def test_admin_work_is_not_counted_as_answering_customers(seeded) -> None:
+    """Sandbox runs, translations and indexing have chat_id NULL. Mixed
+    into «Ответы», they would inflate what a customer answer costs."""
+    async with seeded() as db, db.begin():
+        db.add(
+            AiCall(
+                correlation_id="sandbox:x",
+                chat_id=None,
+                call_type=CallType.CHAT,
+                model="gpt-5.6-luna",
+                cost_usd=Decimal("0.00500000"),
+                cost_kzt=Decimal("2.5000"),
+                created_at=TODAY,
+            )
+        )
+    period = analytics.period_from_days(7)
+    async with seeded() as db:
+        days = await analytics.spend_by_day(db, period)
+        by_model = await analytics.spend_by_model(db, period)
+
+    today = next(row for row in days if row.day == TODAY.date())
+    assert today.by_call_type[analytics.ADMIN_SERIES] == Decimal("2.5000")
+    # The customer answer of the same type is still its own bar.
+    assert today.by_call_type[CallType.CHAT.value] == Decimal("0.1500")
+    admin_rows = [r for r in by_model if r["call_type"] == analytics.ADMIN_SERIES]
+    assert [r["cost_kzt"] for r in admin_rows] == ["2.5000"]
+    # And the total still adds up: nothing was dropped by the split.
+    assert today.total_kzt == Decimal("2.6550")
+
+
+async def test_forecast_rate_includes_spend_the_ledger_never_saw(seeded) -> None:
+    """Embeddings are recorded in ai_calls but never reserved, so the
+    ledger under-reports. A forecast built on the ledger alone promises
+    days the money does not buy."""
+    async with seeded() as db, db.begin():
+        db.add(
+            BudgetLedger(
+                scope=BudgetScope.GLOBAL_MONTH,
+                scope_key=TODAY.strftime("%Y-%m"),
+                limit_usd=Decimal("6.00"),
+                spent_usd=Decimal("0.00100000"),
+                reserved_usd=Decimal(0),
+                period_start=TODAY.date().replace(day=1),
+                period_end=(TODAY.date().replace(day=28) + timedelta(days=4)).replace(
+                    day=1
+                )
+                - timedelta(days=1),
+            )
+        )
+    async with seeded() as db:
+        state = await analytics.budget_state(db, now=TODAY)
+        truth = (
+            await db.execute(
+                select(func.coalesce(func.sum(AiCall.cost_usd), 0)).where(
+                    AiCall.created_at
+                    >= datetime.combine(
+                        TODAY.date().replace(day=1), datetime.min.time(), tzinfo=UTC
+                    ),
+                    AiCall.created_at <= TODAY,
+                    AiCall.status != "started",
+                )
+            )
+        ).scalar_one()
+    assert Decimal(state["month_calls_usd"]) == truth
+    assert Decimal(state["month_calls_usd"]) > Decimal(state["month"]["spent_usd"])
+
+
 async def test_forecast_is_arithmetic_on_real_spend(seeded) -> None:
     async with seeded() as db, db.begin():
         db.add(

@@ -17,7 +17,7 @@ dashboard and the limits page cannot disagree about "today".
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -103,14 +103,23 @@ def _only_real_calls() -> ColumnElement[bool]:
     return AiCall.status != "started"
 
 
+#: Series key for spend the OWNER caused himself from the panel — the
+#: sandbox, the KB translation buttons, indexing the knowledge base. It
+#: has no chat, so mixing it into «Ответы» would inflate what answering
+#: customers actually costs.
+ADMIN_SERIES = "admin"
+
+
 async def spend_by_day(db: AsyncSession, period: Period) -> list[DailySpend]:
     """Daily spend split by call type — the main chart of «Расходы»."""
     day = func.date(AiCall.created_at).label("day")
+    admin = AiCall.chat_id.is_(None).label("admin")
     rows = (
         await db.execute(
             select(
                 day,
                 AiCall.call_type,
+                admin,
                 func.sum(AiCall.cost_usd).label("usd"),
                 func.sum(AiCall.cost_kzt).label("kzt"),
             )
@@ -119,16 +128,17 @@ async def spend_by_day(db: AsyncSession, period: Period) -> list[DailySpend]:
                 AiCall.created_at < period.end_at,
                 _only_real_calls(),
             )
-            .group_by(day, AiCall.call_type)
+            .group_by(day, AiCall.call_type, admin)
         )
     ).all()
 
     buckets = {d: DailySpend(day=d) for d in period.each_day()}
-    for row_day, call_type, usd, kzt in rows:
+    for row_day, call_type, is_admin, usd, kzt in rows:
         bucket = buckets.get(row_day)
         if bucket is None:
             continue
-        bucket.by_call_type[call_type.value] = Decimal(kzt or 0)
+        key = ADMIN_SERIES if is_admin else call_type.value
+        bucket.by_call_type[key] = bucket.by_call_type.get(key, Decimal(0)) + Decimal(kzt or 0)
         bucket.total_usd += Decimal(usd or 0)
         bucket.total_kzt += Decimal(kzt or 0)
     return [buckets[d] for d in period.each_day()]
@@ -174,11 +184,13 @@ async def tokens_by_day(db: AsyncSession, period: Period) -> list[DailyTokens]:
 
 
 async def spend_by_model(db: AsyncSession, period: Period) -> list[dict[str, object]]:
+    admin = AiCall.chat_id.is_(None).label("admin")
     rows = (
         await db.execute(
             select(
                 AiCall.model,
                 AiCall.call_type,
+                admin,
                 func.count().label("calls"),
                 func.sum(AiCall.cost_usd),
                 func.sum(AiCall.cost_kzt),
@@ -188,19 +200,21 @@ async def spend_by_model(db: AsyncSession, period: Period) -> list[dict[str, obj
                 AiCall.created_at < period.end_at,
                 _only_real_calls(),
             )
-            .group_by(AiCall.model, AiCall.call_type)
+            .group_by(AiCall.model, AiCall.call_type, admin)
             .order_by(func.sum(AiCall.cost_usd).desc())
         )
     ).all()
     return [
         {
             "model": model,
-            "call_type": call_type.value,
+            # Same split as the chart: the owner's own clicks are not
+            # what answering a customer costs.
+            "call_type": ADMIN_SERIES if is_admin else call_type.value,
             "calls": int(calls),
             "cost_usd": str(Decimal(usd or 0)),
             "cost_kzt": str(Decimal(kzt or 0)),
         }
-        for model, call_type, calls, usd, kzt in rows
+        for model, call_type, is_admin, calls, usd, kzt in rows
     ]
 
 
@@ -396,6 +410,20 @@ async def language_gaps(db: AsyncSession, period: Period) -> list[dict[str, obje
     ]
 
 
+async def _calls_spend_usd(db: AsyncSession, since: date, until: datetime) -> Decimal:
+    """Everything ai_calls says was actually paid in the window."""
+    total = (
+        await db.execute(
+            select(func.sum(AiCall.cost_usd)).where(
+                AiCall.created_at >= datetime.combine(since, time.min, tzinfo=UTC),
+                AiCall.created_at <= until,
+                _only_real_calls(),
+            )
+        )
+    ).scalar()
+    return Decimal(total or 0)
+
+
 async def budget_state(db: AsyncSession, *, now: datetime | None = None) -> dict[str, object]:
     """Today's and this month's budget, plus an honest projection.
 
@@ -417,7 +445,12 @@ async def budget_state(db: AsyncSession, *, now: datetime | None = None) -> dict
         .all()
     )
 
-    state: dict[str, object] = {"day": None, "month": None, "forecast_date": None}
+    state: dict[str, object] = {
+        "day": None,
+        "month": None,
+        "forecast_date": None,
+        "month_calls_usd": "0",
+    }
     month_row = None
     for row in rows:
         payload = {
@@ -433,17 +466,24 @@ async def budget_state(db: AsyncSession, *, now: datetime | None = None) -> dict
             state["month"] = payload
             month_row = row
 
-    if month_row is not None and month_row.spent_usd > 0:
+    if month_row is not None:
+        # The WALL is the ledger: that is the number the reservation SQL
+        # compares against, so that is what will actually stop the bot.
+        # The RATE is ai_calls: the ledger misses spend that is recorded
+        # but never reserved (embeddings), so a forecast built on it
+        # would promise more days than the money buys.
+        real_month_usd = await _calls_spend_usd(db, month_row.period_start, moment)
+        state["month_calls_usd"] = str(real_month_usd)
         elapsed = (moment.date() - month_row.period_start).days + 1
-        per_day = Decimal(month_row.spent_usd) / elapsed
+        per_day = real_month_usd / elapsed
         left = Decimal(month_row.limit_usd) - Decimal(month_row.spent_usd)
-        if per_day > 0 and left > 0:
+        if left <= 0:
+            state["forecast_date"] = moment.date().isoformat()
+        elif per_day > 0:
             days_left = int(left / per_day)
             projected = moment.date() + timedelta(days=days_left)
             # Never promise beyond the period it describes.
             state["forecast_date"] = min(projected, month_row.period_end).isoformat()
-        elif left <= 0:
-            state["forecast_date"] = moment.date().isoformat()
     return state
 
 
@@ -521,4 +561,5 @@ def call_type_labels() -> dict[str, str]:
         CallType.TRANSCRIPTION.value: "Распознавание речи",
         CallType.EMBEDDING.value: "Поиск по базе знаний",
         CallType.VISION.value: "Распознавание фото",
+        ADMIN_SERIES: "Моя работа в панели",
     }

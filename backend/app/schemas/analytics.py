@@ -53,6 +53,9 @@ class AnalyticsResponse(BaseModel):
     answer_sources: dict[str, int]
     errors: list[dict[str, object]]
     language_gaps: list[dict[str, object]]
+    #: Off by default (owner decision, phase 6): without this the донат
+    #: simply has no «повтор из кэша» slice and looks like a bug.
+    semantic_cache_enabled: bool = False
     #: Metrics SPEC asks for that this schema cannot support honestly.
     #: Shown in the UI as a short note instead of a fabricated chart.
     not_measured: list[str] = Field(default_factory=list)
