@@ -7,6 +7,7 @@ concurrent spenders — application code never "checks then writes".
 
 from __future__ import annotations
 
+import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -19,6 +20,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    Uuid,
     func,
     text,
 )
@@ -206,8 +208,13 @@ class SemanticCacheEntry(Base):
 
 
 class AlertNotification(Base):
-    """Dedup memory for "once per threshold" alerts (SPEC §9.3). Written
-    in phase 6; actual WhatsApp delivery to alert_phone lands in phase 9."""
+    """One alert to the owner, and the memory that it was already sent.
+
+    UNIQUE (kind, event_key, period_key) is what "once per threshold per
+    period" means — in PostgreSQL, so a restart or a second worker
+    cannot repeat it (SPEC §9.3, invariant 2). Delivery is WhatsApp to
+    `alert_phone` (owner decision §4.7: no Telegram).
+    """
 
     __tablename__ = "alert_notifications"
 
@@ -215,7 +222,17 @@ class AlertNotification(Base):
     kind: Mapped[str] = mapped_column(Text)  # budget_day / budget_month / system
     event_key: Mapped[str] = mapped_column(Text)  # "80pct", "circuit_breaker", ...
     period_key: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    # pending -> sent | failed | skipped (skipped = no alert_phone yet)
     status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    #: The sentence the owner receives, composed when the alert is
+    #: recorded: wording must not silently change between recording and
+    #: a retry hours later.
+    body: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(server_default=func.now())
+    last_error: Mapped[str | None] = mapped_column(Text)
+    #: The outbox row carrying this alert, once it was queued for send.
+    outbound_message_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     sent_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

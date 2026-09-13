@@ -1,0 +1,23 @@
+# Daily database dump. Install as root:
+#   cp deploy/systemd/wabot-backup.* /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now wabot-backup.timer
+# Check: systemctl list-timers wabot-backup; journalctl -u wabot-backup
+[Unit]
+Description=Дамп базы WhatsApp-бота (только на этом сервере)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# After a reboot the timer fires before docker has finished starting the
+# containers, and the dump fails for the day. Wait for postgres to be
+# healthy instead of guessing a delay.
+ExecStartPre=/bin/sh -c 'cd /srv/wabot && for i in $(seq 1 60); do docker compose ps postgres --format "{{.Status}}" | grep -q healthy && exit 0; sleep 10; done; echo "postgres did not become healthy"; exit 1' 
+# Путь к каталогу репозитория на этом сервере.
+WorkingDirectory=/srv/wabot
+ExecStart=/srv/wabot/deploy/backup/pg_backup.sh
+# Дампы содержат персональные данные клиентов: файлы создаются с 600,
+# каталог — 700 (см. сам скрипт).
+UMask=0077
+Nice=10
+IOSchedulingClass=idle

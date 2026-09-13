@@ -17,6 +17,7 @@ import DashboardPage from "./pages/DashboardPage";
 import KnowledgePage from "./pages/KnowledgePage";
 import LimitsPage from "./pages/LimitsPage";
 import LoginPage from "./pages/LoginPage";
+import SystemPage from "./pages/SystemPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -53,6 +54,7 @@ const router = createBrowserRouter([
           { path: "/agent", element: <AgentPage /> },
           { path: "/knowledge", element: <KnowledgePage /> },
           { path: "/limits", element: <LimitsPage /> },
+          { path: "/system", element: <SystemPage /> },
           { path: "/account", element: <AccountPage /> },
         ],
       },

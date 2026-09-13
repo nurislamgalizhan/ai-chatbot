@@ -433,6 +433,95 @@ export default function LimitsPage() {
           чат помечается «требует внимания». Тексты распознавания остаются в
           истории после удаления самих файлов.
         </p>
+        <NumberField
+          label="Пауза между ответами о файлах, мин"
+          value={form.media_reply_cooldown_minutes}
+          onChange={(v) => update({ media_reply_cooldown_minutes: v })}
+          hint="бот отвечает про файлы не чаще, чем раз в эти минуты на диалог: каждый такой ответ платный"
+        />
+      </section>
+
+      <section className="card">
+        <h2>Оповещения в WhatsApp</h2>
+        <p className="muted">
+          Бот напишет вам сам, если исчерпан бюджет, пропала связь с WhatsApp,
+          заканчивается место на диске или давно не делалась резервная копия.
+        </p>
+        <label className="limit-field">
+          <span>Номер для оповещений</span>
+          <input
+            value={form.alert_phone}
+            onChange={(e) => update({ alert_phone: e.target.value })}
+            placeholder="+7 701 000 00 00"
+          />
+          <span className="muted">
+            Пока поле пустое, бот никому не пишет — оповещения копятся в разделе
+            «Система». Указав номер, вы разрешаете отправку на него: она работает
+            и в режиме приёмки, когда ответы клиентам ещё не отправляются.
+          </span>
+        </label>
+        <label className="limit-field checkbox">
+          <input
+            type="checkbox"
+            checked={form.alerts_enabled}
+            onChange={(e) => update({ alerts_enabled: e.target.checked })}
+          />
+          <span>Отправлять оповещения</span>
+        </label>
+        <div className="limit-grid">
+          <NumberField
+            label="Тревога при занятости диска, %"
+            value={form.disk_alert_percent}
+            onChange={(v) => update({ disk_alert_percent: v })}
+          />
+          <NumberField
+            label="Тревога при очереди больше, сообщений"
+            value={form.queue_alert_depth}
+            onChange={(v) => update({ queue_alert_depth: v })}
+          />
+          <NumberField
+            label="Тревога, если копии нет дольше, часов"
+            value={form.backup_stale_hours}
+            onChange={(v) => update({ backup_stale_hours: v })}
+          />
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Сроки хранения</h2>
+        <p className="muted">
+          Переписка, расходы и база знаний хранятся бессрочно. Здесь — служебные
+          данные: копия сообщения внутри уведомления WhatsApp, технические
+          журналы и следы доставки.
+        </p>
+        <div className="limit-grid">
+          <NumberField
+            label="Копия текста в уведомлении, дней"
+            value={form.retention_raw_payload_days}
+            onChange={(v) => update({ retention_raw_payload_days: v })}
+            hint="сам текст остаётся в истории диалога; это вторая копия внутри служебных данных"
+          />
+          <NumberField
+            label="Технические события, дней"
+            value={form.retention_system_events_days}
+            onChange={(v) => update({ retention_system_events_days: v })}
+          />
+          <NumberField
+            label="Промахи по языку, дней"
+            value={form.retention_faq_misses_days}
+            onChange={(v) => update({ retention_faq_misses_days: v })}
+          />
+          <NumberField
+            label="Журнал изменений, дней"
+            value={form.retention_audit_log_days}
+            onChange={(v) => update({ retention_audit_log_days: v })}
+          />
+          <NumberField
+            label="Следы отправки и файлов, дней"
+            value={form.retention_transport_days}
+            onChange={(v) => update({ retention_transport_days: v })}
+          />
+        </div>
       </section>
 
       {notice && <div className="plaque warn">{notice}</div>}

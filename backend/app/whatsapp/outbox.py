@@ -32,6 +32,12 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _FLUSH_BATCH_SIZE = 10
+#: wa_outbox.purpose for messages addressed to the owner, not a customer.
+ALERT_PURPOSE = "alert"
+#: 1, 2, 4, 8, 16 minutes: an alert survives a provider outage instead of
+#: exhausting its attempts while the outage is still going on.
+_ALERT_BACKOFF_BASE_SECONDS = 60
+_ALERT_MAX_ATTEMPTS = 6
 
 
 async def enqueue_text(
@@ -41,8 +47,14 @@ async def enqueue_text(
     text: str,
     outbound_message_id: uuid.UUID,
     correlation_id: str | None = None,
+    purpose: str = "customer",
 ) -> bool:
-    """Queue a text send; returns False if this id is already queued."""
+    """Queue a text send; returns False if this id is already queued.
+
+    `purpose` separates the two channels that share this transport: a
+    customer reply (muted by DRY_RUN) and an alert to the owner's own
+    number (never muted — see services/alerts.py).
+    """
     stmt = (
         pg_insert(WaOutbox)
         .values(
@@ -52,6 +64,7 @@ async def enqueue_text(
             kind="text",
             body=text,
             correlation_id=correlation_id,
+            purpose=purpose,
         )
         .on_conflict_do_nothing(constraint="uq_wa_outbox_outbound_message_id")
         .returning(WaOutbox.id)
@@ -60,8 +73,15 @@ async def enqueue_text(
     return inserted is not None
 
 
-def _backoff(settings: Settings, retry_count: int) -> timedelta:
+def _backoff(settings: Settings, retry_count: int, *, purpose: str = "customer") -> timedelta:
     base = settings.outbox_retry_base_seconds * (2**retry_count)
+    if purpose == ALERT_PURPOSE:
+        # An alert is not time-critical to the second, but it IS the
+        # message that must eventually arrive: a customer reply is
+        # pointless an hour late, while "your bot has been silent since
+        # morning" is not. Minutes instead of seconds, so a provider
+        # outage does not burn every attempt in six seconds.
+        base = _ALERT_BACKOFF_BASE_SECONDS * (2**retry_count)
     jitter = base * (secrets.randbelow(400) / 1000)  # 0..40% jitter
     return timedelta(seconds=base + jitter)
 
@@ -78,37 +98,60 @@ class OutboxFlusher:
         self._settings = settings
 
     async def flush_once(self) -> int:
-        """Attempt due sends; returns how many rows changed state."""
-        handled = 0
+        """Attempt due sends; returns how many rows changed state.
+
+        ONE TRANSACTION PER MESSAGE, deliberately. The send itself is an
+        HTTP call that cannot be rolled back: with a shared transaction a
+        SIGKILL (or a crash) after the third of ten sends would roll back
+        all three SENT marks while the customer had already received the
+        messages — and the next pass would send them again. Per-row
+        commits reduce that window to the single message in flight.
+        """
         async with self._sessionmaker() as db:
-            rows = (
+            due = (
                 (
                     await db.execute(
-                        select(WaOutbox)
+                        select(WaOutbox.id)
                         .where(
                             WaOutbox.state.in_(("PENDING", "FAILED_RETRYABLE")),
                             WaOutbox.next_attempt_at <= datetime.now(UTC),
                         )
                         .order_by(WaOutbox.id)
                         .limit(_FLUSH_BATCH_SIZE)
-                        .with_for_update(skip_locked=True)
                     )
                 )
                 .scalars()
                 .all()
             )
-            for row in rows:
-                try:
-                    await self._attempt(db, row)
-                except Exception as exc:  # noqa: BLE001 - one poison row must
-                    # not roll back the batch: earlier rows may already be
-                    # SENT at the provider, and a rollback would re-send
-                    # them (a real duplicate to the customer). Terminal.
-                    logger.exception("outbox_unexpected_error", outbox_id=row.id)
-                    self._fail(db, row, f"unexpected:{type(exc).__name__}", retryable=False)
-                handled += 1
-            await db.commit()
+        handled = 0
+        for row_id in due:
+            handled += await self._flush_one(row_id)
         return handled
+
+    async def _flush_one(self, row_id: int) -> int:
+        async with self._sessionmaker() as db:
+            row = (
+                await db.execute(
+                    select(WaOutbox)
+                    .where(
+                        WaOutbox.id == row_id,
+                        WaOutbox.state.in_(("PENDING", "FAILED_RETRYABLE")),
+                        WaOutbox.next_attempt_at <= datetime.now(UTC),
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                # Taken by another pass, or no longer due.
+                return 0
+            try:
+                await self._attempt(db, row)
+            except Exception as exc:  # noqa: BLE001 - a poison row is
+                # terminal, never an endless retry of the same crash.
+                logger.exception("outbox_unexpected_error", outbox_id=row.id)
+                self._fail(db, row, f"unexpected:{type(exc).__name__}", retryable=False)
+            await db.commit()
+            return 1
 
     async def _attempt(self, db: AsyncSession, row: WaOutbox) -> None:
         log = logger.bind(
@@ -116,8 +159,12 @@ class OutboxFlusher:
             outbound_message_id=str(row.outbound_message_id),
             correlation_id=row.correlation_id,
         )
-        if self._settings.dry_run:
+        if self._settings.dry_run and row.purpose != ALERT_PURPOSE:
             # Acceptance mode: fully processed, deliberately not sent.
+            # Alerts are exempt on purpose — acceptance is exactly when
+            # the owner must still hear "the budget is gone, the bot is
+            # quiet", and that message goes to their own number, not to
+            # a customer.
             row.state = "SKIPPED_DRY_RUN"
             row.sent_at = datetime.now(UTC)
             log.info("outbox_dry_run_skip")
@@ -145,10 +192,17 @@ class OutboxFlusher:
     def _fail(self, db: AsyncSession, row: WaOutbox, code: str, *, retryable: bool) -> None:
         row.retry_count += 1
         row.error_code = code
-        exhausted = row.retry_count >= self._settings.retry_max_attempts
+        max_attempts = (
+            _ALERT_MAX_ATTEMPTS
+            if row.purpose == ALERT_PURPOSE
+            else self._settings.retry_max_attempts
+        )
+        exhausted = row.retry_count >= max_attempts
         if retryable and not exhausted:
             row.state = "FAILED_RETRYABLE"
-            row.next_attempt_at = datetime.now(UTC) + _backoff(self._settings, row.retry_count)
+            row.next_attempt_at = datetime.now(UTC) + _backoff(
+                self._settings, row.retry_count, purpose=row.purpose
+            )
             logger.warning(
                 "outbox_retry_scheduled",
                 outbox_id=row.id,

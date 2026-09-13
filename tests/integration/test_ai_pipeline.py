@@ -855,6 +855,89 @@ async def test_sweeper_requeues_orphan_without_reply(env) -> None:
     assert message.retry_count == 1
 
 
+async def test_a_paid_answer_that_was_lost_is_never_paid_for_twice(env) -> None:
+    """The crash window: the model was called and settled, then storing
+    the reply failed. The message comes back QUEUED — and must go to a
+    human instead of buying the same answer again."""
+    maker = env["maker"]
+    chat_id = await make_chat(maker, env["instance_pk"])
+    msg_id = await add_queued(maker, chat_id)
+    correlation = f"chat:{chat_id}:msg:{msg_id}"
+    async with maker() as db, db.begin():
+        # What survived the crash: the committed accounting row.
+        db.add(
+            AiCall(
+                correlation_id=correlation,
+                chat_id=chat_id,
+                call_type=CallType.CHAT,
+                model="gpt-5.6-luna",
+                cost_usd=Decimal("0.002"),
+                cost_kzt=Decimal("1.0"),
+                status="ok",
+            )
+        )
+
+    handled = await env["pipeline"].run_once()
+
+    assert handled == 1
+    assert env["chat_provider"].requests == [], "the model must not be called a second time"
+    message = await get_message(maker, msg_id)
+    assert message.state is MsgState.HANDED_TO_HUMAN
+    assert message.error_code == "already_charged"
+    async with maker() as db:
+        chat = await db.get(Chat, chat_id)
+    assert chat.needs_attention is True
+
+
+async def test_a_new_message_during_the_crash_does_not_disarm_the_barrier(env) -> None:
+    """The correlation id is built from the LAST message, so a customer
+    who writes again while we recover changes it. The barrier has to look
+    at every message in the batch, or the same question is paid twice."""
+    maker = env["maker"]
+    chat_id = await make_chat(maker, env["instance_pk"])
+    first_id = await add_queued(maker, chat_id)
+    async with maker() as db, db.begin():
+        db.add(
+            AiCall(
+                correlation_id=f"chat:{chat_id}:msg:{first_id}",
+                chat_id=chat_id,
+                call_type=CallType.CHAT,
+                model="gpt-5.6-luna",
+                cost_usd=Decimal("0.002"),
+                cost_kzt=Decimal("1.0"),
+                status="ok",
+            )
+        )
+    # ...and the customer adds another line while we are recovering.
+    second_id = await add_queued(maker, chat_id, "И ещё вопрос")
+
+    await env["pipeline"].run_once()
+
+    assert env["chat_provider"].requests == []
+    for message_id in (first_id, second_id):
+        message = await get_message(maker, message_id)
+        assert message.state is MsgState.HANDED_TO_HUMAN
+        assert message.error_code == "already_charged"
+
+
+async def test_an_ordinary_second_question_is_still_answered(env) -> None:
+    """The barrier must not fire on a chat that simply had a paid answer
+    before: that is every normal dialog."""
+    maker = env["maker"]
+    env["deps"].embedding_provider.mapping[QUESTION] = unit_vector(0.0)
+    chat_id = await make_chat(maker, env["instance_pk"])
+    first_id = await add_queued(maker, chat_id)
+    await env["pipeline"].run_once()
+    assert (await get_message(maker, first_id)).state is MsgState.ANSWERED
+
+    env["chat_provider"].script.append(make_result("Второй ответ", input_tokens=900))
+    second_id = await add_queued(maker, chat_id)
+    await env["pipeline"].run_once()
+
+    assert (await get_message(maker, second_id)).state is MsgState.ANSWERED
+    assert len(env["chat_provider"].requests) == 2
+
+
 # --------------------------- media integration ---------------------------
 
 

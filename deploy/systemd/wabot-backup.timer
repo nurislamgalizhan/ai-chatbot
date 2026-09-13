@@ -1,0 +1,15 @@
+[Unit]
+Description=Ежедневный дамп базы WhatsApp-бота в 03:30
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+# Сервер мог быть выключен в 03:30 — сделать дамп при следующем старте.
+Persistent=true
+# Разброс, чтобы дамп не совпадал с другими ночными задачами VPS.
+RandomizedDelaySec=600
+# A run missed while the server was off starts a few minutes after boot,
+# not at once: docker needs time to bring the database up.
+OnBootSec=15min
+
+[Install]
+WantedBy=timers.target

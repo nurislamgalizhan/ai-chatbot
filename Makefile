@@ -3,7 +3,8 @@ COMPOSE_DEV = $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
 PY ?= .venv/bin/python
 
 .PHONY: up up-dev down build logs migrate revision test lint fmt \
-        create-admin reset-admin-password kb-import seed-prices venv smoke
+        create-admin reset-admin-password kb-import seed-prices venv smoke \
+        backup backup-verify
 
 up:
 	$(COMPOSE) up -d --build
@@ -37,6 +38,14 @@ kb-import:
 
 seed-prices:
 	$(COMPOSE) run --rm backend python -m app.cli seed-prices
+
+backup:
+	./deploy/backup/pg_backup.sh
+
+# Restores the newest dump into a throwaway database and checks what came
+# back. The live database is untouched.
+backup-verify:
+	./deploy/backup/backup_verify.sh
 
 smoke:
 	$(COMPOSE) ps

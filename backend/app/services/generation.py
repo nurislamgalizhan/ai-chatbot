@@ -24,10 +24,12 @@ import structlog
 from app.ai import guardrails
 from app.ai.chat_provider import ChatError, ChatRequest, ChatUsage
 from app.ai.context_builder import ContextInput, HistoryTurn, build_context
+from app.ai.embeddings import EmbeddingError
 from app.models import AiCall, SystemEvent
 from app.models.enums import CallType, KbLanguage
 from app.services import app_settings, budget, semantic_cache
 from app.services.agent import get_active_instruction
+from app.services.alerts import hour_bucket, record_alert
 from app.services.app_settings import get_setting
 from app.services.circuit_breaker import CircuitBreaker
 from app.services.kb_faq import match_faq
@@ -52,6 +54,11 @@ if TYPE_CHECKING:
     from app.config import Settings
 
 logger = structlog.get_logger(__name__)
+
+
+class _RetryableStep(Exception):
+    """A paid-path dependency failed before the model was called."""
+
 
 # Situations where the bot cannot give a normal answer and has to say
 # something to the customer. Owner decision (2026-09-11): there are no
@@ -404,6 +411,22 @@ async def _system_event(
         await db.commit()
 
 
+async def _alert_breaker_open(deps: GenerationDeps) -> None:
+    """The bot just stopped answering everyone. Tell the owner.
+
+    Once per hour: the breaker re-opens on every probe failure while
+    OpenAI is down, and a message per probe would be a storm.
+    """
+    try:
+        async with deps.sessionmaker() as db:
+            await record_alert(
+                db, kind="system", event_key="circuit_breaker", period_key=hour_bucket()
+            )
+            await db.commit()
+    except Exception:
+        logger.exception("breaker_alert_failed")
+
+
 async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> GenerationOutcome:  # noqa: PLR0911, PLR0912, PLR0915 - the pipeline order IS the function
     sub_correlation = f"{inp.correlation_id}:main:a{inp.attempt}"
 
@@ -512,17 +535,38 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
 
     try:
         # --- RAG (accounted embedding call) ------------------------------
-        async with deps.sessionmaker() as db:
-            search = await search_chunks(db, deps.embedding_provider, deps.settings, inp.question)
-            embed_cost = Decimal(0)
-            try:
-                embed_prices = await load_price_sheet(db, search.embed_model)
-                embed_cost = compute_cost_usd(embed_prices, Usage(input_tokens=search.embed_tokens))
-            except PricingError:
-                # Embedding accounting degrades to zero-cost rows, but the
-                # call itself is still visible; the model spend gate is the
-                # reservation above, which already failed closed.
-                logger.warning("embed_price_missing", model=search.embed_model)
+        embed_cost = Decimal(0)
+        try:
+            async with deps.sessionmaker() as db:
+                search = await search_chunks(
+                    db, deps.embedding_provider, deps.settings, inp.question
+                )
+                try:
+                    embed_prices = await load_price_sheet(db, search.embed_model)
+                    embed_cost = compute_cost_usd(
+                        embed_prices, Usage(input_tokens=search.embed_tokens)
+                    )
+                except PricingError:
+                    # Embedding accounting degrades to zero-cost rows, but
+                    # the call itself is still visible; the model spend
+                    # gate is the reservation above, which fails closed.
+                    logger.warning("embed_price_missing", model=search.embed_model)
+        except EmbeddingError as exc:
+            # /v1/embeddings is down. Without this the exception escaped
+            # generate_reply entirely: the caller got no outcome, the
+            # messages stayed PROCESSING until the sweeper, and the chat
+            # went quiet for ten minutes over an error that deserves a
+            # normal retry. The reserve is released by the outer handler.
+            logger.warning("embedding_failed", error=str(exc)[:200])
+            if await breaker.record_failure():
+                await _system_event(
+                    deps,
+                    level="error",
+                    event="circuit_breaker_opened",
+                    detail={"correlation_id": inp.correlation_id, "reason": "embeddings"},
+                )
+                await _alert_breaker_open(deps)
+            raise _RetryableStep(f"embeddings:{str(exc)[:120]}") from exc
         await _record_ai_call(
             deps,
             inp=inp,
@@ -625,6 +669,7 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
                     event="circuit_breaker_opened",
                     detail={"correlation_id": inp.correlation_id, "error": str(exc)[:200]},
                 )
+                await _alert_breaker_open(deps)
             return GenerationOutcome(
                 kind="error",
                 error_code=str(exc)[:200],
@@ -704,6 +749,17 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
             instruction_version=instruction.version,
             model=result.model,
             ai_call_id=ai_call_id,
+        )
+    except _RetryableStep as exc:
+        # A dependency failed before the model was called: nothing was
+        # paid, the hold goes back, and the message is retried like any
+        # other transient failure instead of hanging in PROCESSING.
+        await budget.release(deps.sessionmaker, sub_correlation=sub_correlation)
+        return GenerationOutcome(
+            kind="error",
+            error_code=str(exc)[:200],
+            retryable=True,
+            instruction_version=instruction.version,
         )
     except Exception:
         # Unexpected failure between reserve and settle: money comes back.

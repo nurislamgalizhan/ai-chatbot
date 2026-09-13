@@ -1,0 +1,70 @@
+# Vhost для админ-панели бота на СУЩЕСТВУЮЩЕМ шлюзе (контейнер
+# app-gateway-nginx). Владелец копирует файл в каталог vhost-конфигов
+# шлюза, подставляет свой домен и перезагружает nginx:
+#
+#   docker exec app-gateway-nginx nginx -t
+#   docker exec app-gateway-nginx nginx -s reload
+#
+# Server-блоки mmedet.kz и qr.bva.kz этот файл не трогает.
+# Предварительно шлюз должен быть подключён к сети wabot_edge
+# (docs/deployment.md §3.2), иначе имя wabot-frontend не разрешится.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name bot.mmedet.kz;
+
+    # Выпуск и продление сертификата по webroot — механизм уже настроен
+    # для соседних доменов.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name bot.mmedet.kz;
+
+    ssl_certificate     /etc/letsencrypt/live/bot.mmedet.kz/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bot.mmedet.kz/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:WabotSSL:10m;
+    ssl_session_tickets off;
+
+    # В панели лежит переписка клиентов: поисковым системам и фреймам
+    # здесь делать нечего.
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+
+    # Загрузка файлов в базу знаний — единственный крупный запрос.
+    client_max_body_size 12m;
+
+    # Логи доступа шлюза содержат пути и IP; тексты клиентов в URL не
+    # попадают (панель ходит только в /api/... с телом запроса).
+    access_log /var/log/nginx/bot.mmedet.kz.access.log;
+    error_log  /var/log/nginx/bot.mmedet.kz.error.log warn;
+
+    location / {
+        # Имя контейнера фронтенда в сети wabot_edge. Порт 8080:
+        # nginx-unprivileged слушает непривилегированный порт.
+        proxy_pass http://wabot-frontend:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Экспорт расходов в XLSX может считаться дольше обычного ответа.
+        proxy_read_timeout 120s;
+    }
+}

@@ -30,6 +30,7 @@ from app.models import AiCall, Chat, ChatMemory, Message, SystemEvent
 from app.models.enums import (
     AnswerSource,
     AttentionReason,
+    CallType,
     KbLanguage,
     LastActor,
     MsgDirection,
@@ -39,6 +40,7 @@ from app.models.enums import (
 from app.security import rate_limit
 from app.services import app_settings
 from app.services.agent import get_active_instruction
+from app.services.alerts import hour_bucket, record_alert
 from app.services.app_settings import get_setting
 from app.services.chat_memory import remember, snapshot
 from app.services.chat_modes import ai_allowed
@@ -110,6 +112,12 @@ _PROCESSING_LEASE = timedelta(minutes=10)
 _NOT_CONFIGURED_RETRY = timedelta(minutes=5)
 _RETRY_BACKOFF_BASE_SECONDS = 30
 _HISTORY_ASSISTANT_SOURCES = (MsgSource.AI, MsgSource.OPERATOR_PANEL, MsgSource.OPERATOR_PHONE)
+
+
+def correlation_for(chat_id: int, last_message_id: int) -> str:
+    """The deterministic id that ties a batch, its paid call, its budget
+    reservation and its reply together."""
+    return f"chat:{chat_id}:msg:{last_message_id}"
 
 
 def reply_outbound_id(correlation_id: str) -> uuid.UUID:
@@ -213,6 +221,14 @@ class AiPipeline:
                 # would keep the worker loop from ever sleeping (it idles
                 # only on a zero pass) and burn a core on a 2-vCPU VPS.
                 return 1 if result.did_work else 0
+            if await self._already_charged(result.claim):
+                # We paid for this exact question on an earlier attempt
+                # and lost the answer before it was stored (a crash
+                # between the settled call and the reply row). Paying a
+                # second time for the same message is the one thing the
+                # money rules forbid, so the dialog goes to a human.
+                await self._hand_over_charged(result.claim)
+                return 1
             outcome = await generate_reply(self._deps, result.claim.generation_input)
             await self._persist(result.claim, outcome)
             return 1
@@ -222,6 +238,86 @@ class AiPipeline:
             holder = current.decode() if isinstance(current, bytes) else current
             if holder == token:
                 await self._deps.redis.delete(lock_key)
+
+    async def _already_charged(self, claim: _Claim) -> bool:
+        """True if these messages were already paid for and the answer
+        was lost before it reached the database.
+
+        The check covers EVERY message in the batch, not just the last
+        one: a customer who writes again while the crash is being
+        recovered shifts the correlation id (it is built from the last
+        message), and a barrier that only looked at the new id would let
+        the same question be paid for twice.
+        """
+        candidates = [
+            correlation_for(claim.chat_id, message_id) for message_id in claim.message_ids
+        ]
+        async with self._deps.sessionmaker() as db:
+            paid = (
+                (
+                    await db.execute(
+                        select(AiCall.correlation_id).where(
+                            AiCall.correlation_id.in_(candidates),
+                            AiCall.call_type == CallType.CHAT,
+                            AiCall.status == "ok",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not paid:
+                return False
+            answered = (
+                (
+                    await db.execute(
+                        select(Message.outbound_message_id).where(
+                            Message.outbound_message_id.in_([reply_outbound_id(c) for c in paid])
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            delivered = set(answered)
+            return any(reply_outbound_id(c) not in delivered for c in paid)
+
+    async def _hand_over_charged(self, claim: _Claim) -> None:
+        async with self._deps.sessionmaker() as db:
+            chat = await db.get(Chat, claim.chat_id, with_for_update=True)
+            messages = (
+                (
+                    await db.execute(
+                        select(Message)
+                        .where(
+                            Message.id.in_(claim.message_ids),
+                            Message.state == MsgState.PROCESSING,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for message in messages:
+                message.state = MsgState.HANDED_TO_HUMAN
+                message.error_code = "already_charged"
+                message.next_attempt_at = None
+            if chat is not None:
+                await set_attention(
+                    db, chat, AttentionReason.PROCESSING_ERROR, claim.correlation_id
+                )
+            db.add(
+                SystemEvent(
+                    level="error",
+                    component="ai_pipeline",
+                    event="already_charged",
+                    detail={"correlation_id": claim.correlation_id},
+                    correlation_id=claim.correlation_id,
+                )
+            )
+            await db.commit()
+        logger.error("pipeline_already_charged", correlation_id=claim.correlation_id)
 
     # ------------------------------ claim -------------------------------
 
@@ -341,7 +437,7 @@ class AiPipeline:
                 return _ClaimResult(media_ack=media_ack)
 
             # 5. Claim: deterministic correlation + PROCESSING lease.
-            correlation_id = f"chat:{chat_id}:msg:{text_messages[-1].id}"
+            correlation_id = correlation_for(chat_id, text_messages[-1].id)
             lease = now + _PROCESSING_LEASE
             for message in text_messages:
                 message.state = MsgState.PROCESSING
@@ -677,6 +773,16 @@ class AiPipeline:
                     event="ai_not_configured",
                     detail={"reason": error_code},
                 )
+            )
+            # Customers are writing and nobody is answering them: without
+            # an alert this state is only visible to someone who opens
+            # the panel and knows where to look.
+            await record_alert(
+                db,
+                kind="system",
+                event_key="not_configured",
+                period_key=hour_bucket(),
+                detail={"reason": error_code},
             )
             await set_attention(db, chat, AttentionReason.PROCESSING_ERROR)
 

@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from app.ai.tokens import estimate_tokens
 from app.models import AiCall, KbChunk, KbDocument, KbProcessingLog
@@ -205,6 +205,14 @@ async def _index_one(
     report = IndexResult()
     try:
         async with sessionmaker() as db:
+            # Embedding a document means calling OpenAI while this
+            # transaction is open (the chunks and the vectors are written
+            # together, deliberately). The server kills sessions idle in
+            # a transaction for 60 s to stop a crashed client from
+            # holding locks — but this session is not idle by accident,
+            # and being killed here means paying for embeddings that are
+            # then thrown away. LOCAL: applies to this transaction only.
+            await db.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
             document = (
                 await db.execute(
                     select(KbDocument)

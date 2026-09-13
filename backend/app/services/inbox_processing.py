@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy import select, update
+from sqlalchemy.exc import DBAPIError
 
-from app.models import Chat, InboundNotification, Message, WaOutbox
+from app.models import Chat, InboundNotification, Message, SystemEvent, WaOutbox
 from app.models.enums import (
     AttentionClearedReason,
     MediaType,
@@ -23,6 +24,9 @@ from app.models.enums import (
     MsgSource,
     MsgState,
 )
+from app.services import app_settings
+from app.services.alerts import is_alert_chat
+from app.services.app_settings import get_setting
 from app.services.chat_modes import on_operator_message
 from app.services.chats import (
     clear_attention,
@@ -65,18 +69,76 @@ async def process_inbound_batch(db: AsyncSession) -> int:
     )
     for row in rows:
         try:
-            await _process_one(db, row)
+            # SAVEPOINT per notification. A PostgreSQL-level error (a FK
+            # violation, a deadlock against the pipeline's SELECT FOR
+            # UPDATE on the same chat) poisons the whole transaction:
+            # without this, the batch could neither be committed nor
+            # marked failed, the rows stayed `stored`, and the inbox
+            # jammed forever on one bad notification — the bot goes
+            # silent for every customer.
+            async with db.begin_nested():
+                await _process_one(db, row)
             row.status = "processed"
-        except Exception:
+        except Exception as exc:
             logger.exception("inbound_processing_failed", inbound_id=row.id)
+            if _is_transient(exc) and row.process_attempts < _MAX_PROCESS_ATTEMPTS:
+                # A deadlock or serialization failure is the database
+                # asking us to try again, not a broken notification.
+                # Dropping a customer's message on one of those would
+                # lose a real question forever.
+                row.process_attempts += 1
+                continue
             row.status = "failed"
+            db.add(
+                SystemEvent(
+                    level="error",
+                    component="inbox",
+                    event="inbound_processing_failed",
+                    detail={
+                        "inbound_id": row.id,
+                        "type": row.notification_type,
+                        "error": type(exc).__name__,
+                    },
+                )
+            )
         row.processed_at = datetime.now(UTC)
     return len(rows)
+
+
+#: PostgreSQL asks the client to retry these; they say nothing about the
+#: notification itself. 40001 = serialization failure, 40P01 = deadlock.
+_RETRY_SQLSTATES = {"40001", "40P01", "55P03", "57014"}
+#: After this many transient failures the row is treated as poison
+#: anyway: an endless retry would jam the inbox just as badly.
+_MAX_PROCESS_ATTEMPTS = 5
+
+
+def _is_transient(exc: BaseException) -> bool:
+    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None) or getattr(
+        exc, "sqlstate", None
+    )
+    if sqlstate in _RETRY_SQLSTATES:
+        return True
+    # Connection-level failures (database restarted mid-batch) are
+    # transient by definition.
+    return isinstance(exc, DBAPIError) and exc.connection_invalidated
 
 
 async def _process_one(db: AsyncSession, row: InboundNotification) -> None:
     body: dict[str, Any] = row.raw_payload or {}
     classified = classify(row.id, body)
+
+    # The owner's alert number is not a customer. Our own alert echoes
+    # back as an outgoing notification (it would open a "chat" with the
+    # owner's personal number), and a reply to an alert would arrive as
+    # an incoming message — answered by the AI, paid for, and counted as
+    # a customer conversation.
+    wa_chat_id = str((body.get("senderData") or {}).get("chatId", ""))
+    if wa_chat_id and is_alert_chat(
+        wa_chat_id, str(await get_setting(db, app_settings.ALERT_PHONE) or "")
+    ):
+        logger.info("alert_channel_notification_ignored", inbound_id=row.id)
+        return
 
     if classified.kind in (Kind.INCOMING_PRIVATE, Kind.INCOMING_STICKER):
         await _handle_incoming(db, row, body, is_sticker=classified.kind is Kind.INCOMING_STICKER)

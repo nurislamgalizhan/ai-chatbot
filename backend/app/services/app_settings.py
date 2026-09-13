@@ -75,6 +75,36 @@ VISION_ENABLED = "vision_enabled"
 # name, section and place names correctly. White-label: owner-supplied,
 # nothing company-specific in code.
 TRANSCRIPTION_TERMS = "transcription_terms"
+# How long after telling a customer "your file went to a manager" the bot
+# stays silent about further files in the same chat. Composing that
+# sentence is a PAID model call (no canned templates since 2026-09-11),
+# and the media path has no per-customer rate limit of its own: without
+# this, twenty photos in a row bought twenty refusals.
+MEDIA_REPLY_COOLDOWN_MINUTES = "media_reply_cooldown_minutes"
+
+# --- phase 9 keys: retention (docs/security-and-cost-controls.md §5) ---
+# The customer's own words inside the provider payload. Wiped first and
+# soonest: after 30 days the message itself is in `messages`, and the
+# JSONB copy is only a second place for the same personal data to leak.
+RETENTION_RAW_PAYLOAD_DAYS = "retention_raw_payload_days"
+RETENTION_SYSTEM_EVENTS_DAYS = "retention_system_events_days"
+RETENTION_FAQ_MISSES_DAYS = "retention_faq_misses_days"
+RETENTION_AUDIT_LOG_DAYS = "retention_audit_log_days"
+# Delivery attempts and finished media jobs behind the visible history.
+RETENTION_TRANSPORT_DAYS = "retention_transport_days"
+
+# --- phase 9 keys: alerts and monitoring ---
+# WhatsApp number that receives alerts. Empty = nothing is ever sent
+# anywhere (the owner has not opted in yet); alerts still accumulate and
+# are visible in «Система».
+ALERT_PHONE = "alert_phone"
+ALERTS_ENABLED = "alerts_enabled"
+# Disk fill level that makes the worker alert the owner (SPEC: >85%).
+DISK_ALERT_PERCENT = "disk_alert_percent"
+# Queue depth that means the bot is falling behind, not merely busy.
+QUEUE_ALERT_DEPTH = "queue_alert_depth"
+# Hours without a successful database dump before the owner is told.
+BACKUP_STALE_HOURS = "backup_stale_hours"
 
 DEFAULTS: dict[str, Any] = {
     EMERGENCY_AI_OFF: False,
@@ -115,6 +145,17 @@ DEFAULTS: dict[str, Any] = {
     # turns it on knowingly in «Лимиты» → «Медиа».
     VISION_ENABLED: False,
     TRANSCRIPTION_TERMS: "",
+    MEDIA_REPLY_COOLDOWN_MINUTES: 10,
+    RETENTION_RAW_PAYLOAD_DAYS: 30,
+    RETENTION_SYSTEM_EVENTS_DAYS: 90,
+    RETENTION_FAQ_MISSES_DAYS: 180,
+    RETENTION_AUDIT_LOG_DAYS: 365,
+    RETENTION_TRANSPORT_DAYS: 30,
+    ALERT_PHONE: "",
+    ALERTS_ENABLED: True,
+    DISK_ALERT_PERCENT: 85,
+    QUEUE_ALERT_DEPTH: 50,
+    BACKUP_STALE_HOURS: 36,
 }
 
 

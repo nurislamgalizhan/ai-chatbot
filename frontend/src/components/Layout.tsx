@@ -98,6 +98,12 @@ export default function Layout() {
           <Icon name="chart" /> Аналитика
         </NavLink>
         <NavLink
+          to="/system"
+          className={({ isActive }) => (isActive ? "active" : "")}
+        >
+          <Icon name="monitor" /> Система
+        </NavLink>
+        <NavLink
           to="/account"
           className={({ isActive }) => (isActive ? "active" : "")}
         >

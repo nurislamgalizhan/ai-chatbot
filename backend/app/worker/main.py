@@ -22,11 +22,17 @@ from app.ai.transcription import (
     TranscriptionProvider,
 )
 from app.config import get_settings
-from app.db.engine import build_engine, build_sessionmaker
+from app.db.engine import (
+    WORKER_MAX_OVERFLOW,
+    WORKER_POOL_SIZE,
+    build_engine,
+    build_sessionmaker,
+)
 from app.media import storage
 from app.models import Message
 from app.observability.logging import configure_logging
 from app.services import app_settings
+from app.services.alerts import AlertDispatcher
 from app.services.app_settings import get_setting
 from app.services.budget import sweep_stale_holds
 from app.services.chat_modes import resume_expired_pauses
@@ -34,6 +40,8 @@ from app.services.generation import GenerationDeps
 from app.services.inbox_processing import process_inbound_batch, reconcile_outbox
 from app.services.kb_indexing import process_pending_documents
 from app.services.media_processing import MediaDeps, MediaProcessor
+from app.services.monitoring import check_and_alert
+from app.services.retention import run_retention
 from app.whatsapp.green_api import GreenApiProvider
 from app.whatsapp.outbox import OutboxFlusher
 from app.whatsapp.provider import ProviderError
@@ -65,11 +73,26 @@ _MEDIA_IDLE_SECONDS = 2.0
 # would only add disk churn on a shared VPS.
 _MEDIA_RETENTION_INTERVAL_SECONDS = 3600.0
 _MEDIA_RETENTION_BATCH = 200
+# Database retention is a daily job by nature (windows are 30-365 days);
+# it runs six-hourly so that a worker restarted every day still gets to
+# do it, and each pass is a no-op when there is nothing due.
+_RETENTION_INTERVAL_SECONDS = 6 * 3600.0
+# Alerts must reach the owner quickly — this is the "the bot went quiet"
+# channel — but a failed send backs off on its own schedule.
+_ALERT_INTERVAL_SECONDS = 20.0
+_MONITORING_INTERVAL_SECONDS = 300.0
 
 
 async def _heartbeat_loop(redis: Redis, stop: asyncio.Event) -> None:
     while not stop.is_set():
-        await redis.set(HEARTBEAT_KEY, datetime.now(UTC).isoformat(), ex=HEARTBEAT_TTL_SECONDS)
+        try:
+            await redis.set(HEARTBEAT_KEY, datetime.now(UTC).isoformat(), ex=HEARTBEAT_TTL_SECONDS)
+        except Exception:
+            # Redis restarted or hit maxmemory. Without this guard the
+            # exception escapes into the TaskGroup, which cancels every
+            # other loop: a blip in a coordination service would take
+            # polling, the outbox and the AI pipeline down with it.
+            logger.exception("heartbeat_failed")
         await _wait(stop, HEARTBEAT_INTERVAL_SECONDS)
 
 
@@ -253,6 +276,7 @@ async def _media_retention_loop(
     """
     while not stop.is_set():
         try:
+            cleared = 0
             async with sessionmaker() as db:
                 days = int(await get_setting(db, app_settings.MEDIA_RETENTION_DAYS))
                 cutoff = datetime.now(UTC) - timedelta(days=days)
@@ -276,13 +300,67 @@ async def _media_retention_loop(
                             storage.delete_ref, settings.media_dir, message.media_ref
                         )
                         message.media_ref = None
+                        cleared += 1
                 await db.commit()
-            orphans = await asyncio.to_thread(storage.sweep_orphans, settings.media_dir, days)
-            if rows or orphans:
-                logger.info("media_retention_run", rows=len(rows), orphan_files=orphans)
+            # The filesystem sweep removes every file past the window,
+            # including those whose row this pass did not reach. Running
+            # it only when the database pass is CAUGHT UP keeps the two
+            # in step: otherwise the panel shows "file unavailable" for
+            # messages whose media_ref is still set.
+            orphans = 0
+            if len(rows) < _MEDIA_RETENTION_BATCH:
+                orphans = await asyncio.to_thread(storage.sweep_orphans, settings.media_dir, days)
+            if cleared or orphans:
+                logger.info("media_retention_run", rows=cleared, orphan_files=orphans)
         except Exception:
             logger.exception("media_retention_error")
         await _wait(stop, _MEDIA_RETENTION_INTERVAL_SECONDS)
+
+
+async def _retention_loop(
+    sessionmaker: async_sessionmaker[AsyncSession], stop: asyncio.Event
+) -> None:
+    """Database retention (docs/security-and-cost-controls.md §5).
+
+    Deliberately separate from the media loop: that one frees disk, this
+    one drops personal data we promised not to keep and debris that would
+    otherwise turn a small database into a slow one.
+    """
+    while not stop.is_set():
+        try:
+            result = await run_retention(sessionmaker)
+            if result.total:
+                logger.info("retention_done", **result.counts)
+        except Exception:
+            logger.exception("retention_error")
+        await _wait(stop, _RETENTION_INTERVAL_SECONDS)
+
+
+async def _alert_loop(sessionmaker: async_sessionmaker[AsyncSession], stop: asyncio.Event) -> None:
+    """Queue pending alerts for the owner and read back what happened.
+
+    The send itself belongs to the outbox loop: alerts ride the same
+    transport as customer replies, minus the DRY_RUN mute.
+    """
+    dispatcher = AlertDispatcher(sessionmaker)
+    while not stop.is_set():
+        try:
+            await dispatcher.dispatch_pending()
+        except Exception:
+            logger.exception("alert_loop_error")
+        await _wait(stop, _ALERT_INTERVAL_SECONDS)
+
+
+async def _monitoring_loop(
+    settings: Settings, sessionmaker: async_sessionmaker[AsyncSession], stop: asyncio.Event
+) -> None:
+    """Disk, queue depth and backup freshness -> events and alerts."""
+    while not stop.is_set():
+        try:
+            await check_and_alert(sessionmaker, media_dir=settings.media_dir)
+        except Exception:
+            logger.exception("monitoring_error")
+        await _wait(stop, _MONITORING_INTERVAL_SECONDS)
 
 
 async def _wait(stop: asyncio.Event, seconds: float) -> None:
@@ -296,7 +374,7 @@ async def run() -> None:  # noqa: PLR0915 - one wiring block per loop; splitting
     settings = get_settings()
     configure_logging(settings)
     redis = Redis.from_url(settings.redis_url)
-    engine = build_engine(settings)
+    engine = build_engine(settings, pool_size=WORKER_POOL_SIZE, max_overflow=WORKER_MAX_OVERFLOW)
     sessionmaker = build_sessionmaker(engine)
     stop = asyncio.Event()
 
@@ -372,6 +450,9 @@ async def run() -> None:  # noqa: PLR0915 - one wiring block per loop; splitting
             group.create_task(_recovery_loop(pipeline, sessionmaker, stop))
             group.create_task(_media_loop(media_processor, stop))
             group.create_task(_media_retention_loop(settings, sessionmaker, stop))
+            group.create_task(_retention_loop(sessionmaker, stop))
+            group.create_task(_alert_loop(sessionmaker, stop))
+            group.create_task(_monitoring_loop(settings, sessionmaker, stop))
     finally:
         if provider is not None:
             await provider.aclose()

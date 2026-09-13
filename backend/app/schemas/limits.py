@@ -38,6 +38,20 @@ class LimitsSettings(BaseModel):
     max_image_file_mb: int = Field(ge=1, le=32)
     media_retention_days: int = Field(ge=1, le=365)
     transcription_terms: str = Field(default="", max_length=1000)
+    media_reply_cooldown_minutes: int = Field(ge=0, le=180)
+    # --- alerts and retention (phase 9) ---
+    #: Empty until the owner opts in: while it is empty nothing is ever
+    #: sent to any number, alerts only accumulate in «Система».
+    alert_phone: str = Field(default="", max_length=20)
+    alerts_enabled: bool = True
+    disk_alert_percent: int = Field(ge=50, le=99)
+    queue_alert_depth: int = Field(ge=1, le=10_000)
+    backup_stale_hours: int = Field(ge=6, le=720)
+    retention_raw_payload_days: int = Field(ge=1, le=365)
+    retention_system_events_days: int = Field(ge=7, le=1_095)
+    retention_faq_misses_days: int = Field(ge=7, le=1_095)
+    retention_audit_log_days: int = Field(ge=30, le=3_650)
+    retention_transport_days: int = Field(ge=1, le=365)
 
 
 class PriceItem(BaseModel):

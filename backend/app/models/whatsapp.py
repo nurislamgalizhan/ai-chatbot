@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, ForeignKey, Identity, Text, Uuid, func, text
+from sqlalchemy import BigInteger, ForeignKey, Identity, Integer, Text, Uuid, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,6 +24,12 @@ class WhatsappInstance(Base):
     is_active: Mapped[bool] = mapped_column(server_default=text("true"))
     last_polled_at: Mapped[datetime | None]
     last_error: Mapped[str | None] = mapped_column(Text)
+    #: Provider-reported authorization state ("authorized", "notAuthorized",
+    #: "blocked", ...), refreshed only when the owner presses «Проверить
+    #: подключение» — a status page must not poll a paid or rate-limited
+    #: endpoint on every render.
+    state: Mapped[str | None] = mapped_column(Text)
+    state_checked_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -48,6 +54,10 @@ class InboundNotification(Base):
     raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     received_at: Mapped[datetime] = mapped_column(server_default=func.now())
     processed_at: Mapped[datetime | None]
+    #: Transient database failures (deadlock, serialization) are retried;
+    #: this bounds that retry so a genuinely poisonous row cannot jam the
+    #: inbox forever.
+    process_attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     # stored: awaits processing by later pipeline phases;
     # ignored: terminal (groups, broadcasts, calls, instance events);
     # processed / failed: set by the processing pipeline;
@@ -73,6 +83,9 @@ class WaOutbox(Base):
     outbound_message_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     wa_chat_id: Mapped[str] = mapped_column(Text)
     kind: Mapped[str] = mapped_column(Text, server_default=text("'text'"))  # text|file
+    #: customer | alert. An alert is for the OWNER's own number: DRY_RUN
+    #: silences the customer channel, never the alarm bell.
+    purpose: Mapped[str] = mapped_column(Text, server_default=text("'customer'"))
     body: Mapped[str | None] = mapped_column(Text)  # message text or caption
     file_ref: Mapped[str | None] = mapped_column(Text)  # local path for kind=file
     # PENDING -> SENT | SKIPPED_DRY_RUN | FAILED_RETRYABLE -> FAILED_FINAL

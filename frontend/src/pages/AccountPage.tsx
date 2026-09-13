@@ -8,6 +8,12 @@ import {
   revokeOtherSessions,
   revokeSession,
 } from "../api/auth";
+import {
+  getJournal,
+  getLoginHistory,
+  getRecoveryCodesStatus,
+  regenerateRecoveryCodes,
+} from "../api/system";
 
 function formatDate(value: string): string {
   return new Date(value).toLocaleString("ru-RU");
@@ -173,6 +179,200 @@ export default function AccountPage() {
           <span className="muted">Загрузка…</span>
         )}
       </div>
+
+      <RecoveryCodesCard />
+      <LoginHistoryCard />
+      <JournalCard />
+    </div>
+  );
+}
+
+/** Recovery codes: the only way back in when the phone with the
+ *  authenticator is lost. Shown once — only hashes are stored. */
+function RecoveryCodesCard() {
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const status = useQuery({
+    queryKey: ["recovery-codes-status"],
+    queryFn: getRecoveryCodesStatus,
+  });
+  const regenerate = useMutation({
+    mutationFn: () => regenerateRecoveryCodes(password),
+    onSuccess: (data) => {
+      setCodes(data.codes);
+      setPassword("");
+      setError(null);
+      void status.refetch();
+    },
+    onError: (err) =>
+      setError(
+        err instanceof ApiError && err.status === 403
+          ? "Текущий пароль неверен"
+          : "Не удалось выпустить коды",
+      ),
+  });
+
+  return (
+    <div className="card" style={{ marginTop: 18 }}>
+      <h2>Коды восстановления</h2>
+      <p className="muted">
+        Каждый код срабатывает один раз вместо кода из приложения. Нужны, если
+        телефон с приложением потерян.
+      </p>
+      {status.data && (
+        <p>
+          Осталось неиспользованных: <strong>{status.data.unused}</strong> из{" "}
+          {status.data.total}
+        </p>
+      )}
+      {codes ? (
+        <>
+          <div className="plaque warn">
+            Сохраните коды сейчас — показать их снова невозможно. Старые коды
+            больше не работают.
+          </div>
+          <pre className="codes-block">{codes.join("\n")}</pre>
+        </>
+      ) : (
+        <>
+          <label className="limit-field">
+            <span>Текущий пароль</span>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+            />
+            <span className="muted">
+              Коды работают вместо второго фактора, поэтому для выпуска нужен пароль.
+            </span>
+          </label>
+          {error && <div className="error">{error}</div>}
+          <button
+            type="button"
+            disabled={regenerate.isPending || password.length === 0}
+            onClick={() => {
+              if (
+                window.confirm(
+                  "Выпустить новые коды? Все прежние коды перестанут работать.",
+                )
+              ) {
+                regenerate.mutate();
+              }
+            }}
+          >
+            Выпустить новые коды
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function LoginHistoryCard() {
+  const history = useQuery({ queryKey: ["login-history"], queryFn: getLoginHistory });
+  return (
+    <div className="card" style={{ marginTop: 18 }}>
+      <h2>Входы в панель</h2>
+      {history.data?.last_success_at && (
+        <p className="muted">
+          Последний успешный вход: {formatDate(history.data.last_success_at)}
+        </p>
+      )}
+      {history.isPending ? (
+        <span className="muted">Загрузка…</span>
+      ) : !history.data || history.data.items.length === 0 ? (
+        <span className="muted">Записей пока нет.</span>
+      ) : (
+        <table className="plain-table">
+          <thead>
+            <tr>
+              <th>Когда</th>
+              <th>Что произошло</th>
+              <th>IP</th>
+            </tr>
+          </thead>
+          <tbody>
+            {history.data.items.map((row) => (
+              <tr key={row.id}>
+                <td className="muted">{formatDate(row.created_at)}</td>
+                <td>{row.outcome}</td>
+                <td className="muted">{row.ip ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+/** SPEC §12.8: what changed in settings, limits, knowledge base and chat
+ *  modes — the record that answers "почему бот стал отвечать иначе". */
+function JournalCard() {
+  const [filter, setFilter] = useState("");
+  const journal = useQuery({
+    queryKey: ["journal", filter],
+    queryFn: () => getJournal(filter),
+  });
+  const FILTERS: { value: string; label: string }[] = [
+    { value: "", label: "Всё" },
+    { value: "kb.", label: "База знаний" },
+    { value: "limits.", label: "Лимиты" },
+    { value: "agent.", label: "Агент" },
+    { value: "chat.", label: "Диалоги" },
+    { value: "auth.", label: "Входы" },
+  ];
+
+  return (
+    <div className="card" style={{ marginTop: 18 }}>
+      <div className="toolbar">
+        <h2>Журнал изменений</h2>
+        <div className="spacer" />
+        <div className="segmented">
+          {FILTERS.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              className={filter === item.value ? "active" : ""}
+              onClick={() => setFilter(item.value)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {journal.isPending ? (
+        <span className="muted">Загрузка…</span>
+      ) : !journal.data || journal.data.items.length === 0 ? (
+        <span className="muted">Записей нет.</span>
+      ) : (
+        <div className="table-scroll">
+          <table className="plain-table">
+            <thead>
+              <tr>
+                <th>Когда</th>
+                <th>Действие</th>
+                <th>Объект</th>
+                <th>IP</th>
+              </tr>
+            </thead>
+            <tbody>
+              {journal.data.items.map((row) => (
+                <tr key={row.id}>
+                  <td className="muted">{formatDate(row.created_at)}</td>
+                  <td>{row.summary}</td>
+                  <td className="muted">
+                    {row.entity_type ? `${row.entity_type} ${row.entity_id ?? ""}` : "—"}
+                  </td>
+                  <td className="muted">{row.ip ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

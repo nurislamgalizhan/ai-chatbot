@@ -27,11 +27,13 @@ import structlog
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from app.models import AlertNotification, BudgetLedger, BudgetReservation, SystemEvent
+from app.models import BudgetLedger, BudgetReservation, SystemEvent
 from app.models.enums import BudgetScope, ReservationStatus
+from app.observability.logging import mask_phone
 from app.services import app_settings
+from app.services.alerts import record_alert
 from app.services.app_settings import get_setting
-from app.services.pricing import kzt_to_usd, load_usd_kzt_rate
+from app.services.pricing import PricingError, kzt_to_usd, load_usd_kzt_rate, usd_to_kzt
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -191,9 +193,18 @@ async def reserve(
                 logger.info(
                     "budget_blocked",
                     scope=spec.scope.value,
-                    scope_key=spec.scope_key,
+                    # The per-customer scope key IS a phone number
+                    # (invariant 9: phones are masked in logs).
+                    scope_key=_safe_scope_key(spec),
                     correlation_id=sub_correlation,
                 )
+                # The bot stops answering HERE, not at settle: a refused
+                # reservation is the moment the customer stops getting
+                # answers. Thresholds alone can miss it entirely (a limit
+                # can be reached at 94% spent because the next estimate
+                # no longer fits), so the owner is told about the refusal
+                # itself — once per period per scope.
+                await _record_block_alert(sessionmaker, spec)
                 return ReserveOutcome(allowed=False, blocked_scope=spec.scope.value)
         await db.commit()
     return ReserveOutcome(allowed=True)
@@ -314,6 +325,50 @@ async def update_open_limits(
     return int(getattr(result, "rowcount", 0) or 0)
 
 
+def _safe_scope_key(spec: ScopeSpec) -> str:
+    """Scope keys are dates for global scopes; user_day embeds a PHONE
+    (`user:+7701...:2026-09-14`), and that must never be logged or shown
+    in full (SPEC invariant 9)."""
+    if spec.scope is not BudgetScope.USER_DAY:
+        return spec.scope_key
+    parts = spec.scope_key.split(":")
+    expected_parts = 3
+    if len(parts) != expected_parts:
+        return "user:***"
+    return f"user:{mask_phone(parts[1])}:{parts[2]}"
+
+
+async def _record_block_alert(
+    sessionmaker: async_sessionmaker[AsyncSession], spec: ScopeSpec
+) -> None:
+    """Own transaction: the reservation's own one was just rolled back."""
+    try:
+        async with sessionmaker() as db:
+            created = await record_alert(
+                db,
+                kind="budget_block",
+                event_key=spec.scope.value,
+                period_key=spec.scope_key,
+                detail={"scope": spec.scope.value},
+            )
+            if created:
+                db.add(
+                    SystemEvent(
+                        level="critical",
+                        component="budget",
+                        event="budget_blocked",
+                        # The «Система» page renders this detail; for the
+                        # per-customer scope the key is that customer's
+                        # phone number, which must not be displayed there.
+                        detail={"scope": spec.scope.value, "scope_key": _safe_scope_key(spec)},
+                    )
+                )
+            await db.commit()
+    except Exception:
+        # Telling the owner must never break refusing the spend.
+        logger.exception("budget_block_alert_failed", scope=spec.scope.value)
+
+
 async def _record_threshold_alerts(db: AsyncSession) -> None:
     """50/80/90/100% of the day/month budget — once per threshold per
     period (UNIQUE dedup); WhatsApp delivery itself lands in phase 9."""
@@ -333,26 +388,32 @@ async def _record_threshold_alerts(db: AsyncSession) -> None:
         if ledger is None or ledger.limit_usd <= 0:
             continue
         pct = int(ledger.spent_usd / ledger.limit_usd * 100)
+        # The owner sets limits in tenge and thinks in tenge, so the
+        # alert says tenge. No rate on file: the dollar figure is still
+        # true, so the alert goes out without the conversion.
+        rate: Decimal | None = None
+        try:
+            rate = await load_usd_kzt_rate(db)
+        except PricingError:
+            logger.warning("alert_rate_missing")
         for threshold in _THRESHOLDS:
             if pct < threshold:
                 break
-            inserted = (
-                await db.execute(
-                    pg_insert(AlertNotification)
-                    .values(
-                        kind=kind,
-                        event_key=f"{threshold}pct",
-                        period_key=period_key,
-                        detail={
-                            "spent_usd": str(ledger.spent_usd),
-                            "limit_usd": str(ledger.limit_usd),
-                        },
-                    )
-                    .on_conflict_do_nothing(constraint="uq_alert_notifications_dedupe")
-                    .returning(AlertNotification.id)
-                )
-            ).scalar_one_or_none()
-            if inserted is not None:
+            detail: dict[str, str] = {
+                "spent_usd": str(ledger.spent_usd),
+                "limit_usd": str(ledger.limit_usd),
+            }
+            if rate is not None:
+                detail["spent_kzt"] = str(usd_to_kzt(Decimal(ledger.spent_usd), rate))
+                detail["limit_kzt"] = str(usd_to_kzt(Decimal(ledger.limit_usd), rate))
+            inserted = await record_alert(
+                db,
+                kind=kind,
+                event_key=f"{threshold}pct",
+                period_key=period_key,
+                detail=detail,
+            )
+            if inserted:
                 db.add(
                     SystemEvent(
                         level="warning" if threshold < 100 else "critical",  # noqa: PLR2004

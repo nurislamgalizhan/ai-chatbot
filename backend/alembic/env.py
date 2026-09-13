@@ -39,6 +39,13 @@ def _run_sync_migrations(connection) -> None:  # type: ignore[no-untyped-def]
 async def run_migrations_online() -> None:
     engine = create_async_engine(_database_url())
     async with engine.connect() as connection:
+        # The server caps ordinary statements at 30 s so a stuck query
+        # cannot hold locks and silence the bot (docker-compose.yml).
+        # A migration is the one legitimate long statement: building an
+        # index over a year of messages takes as long as it takes, and
+        # being killed halfway would leave the schema half-applied.
+        await connection.exec_driver_sql("SET statement_timeout = 0")
+        await connection.exec_driver_sql("SET lock_timeout = '30s'")
         await connection.run_sync(_run_sync_migrations)
         await connection.commit()
     await engine.dispose()

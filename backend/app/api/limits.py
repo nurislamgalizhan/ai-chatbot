@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +33,7 @@ from app.security.deps import client_ip, get_app_settings, get_db, require_admin
 from app.services import app_settings
 from app.services.app_settings import get_setting, set_setting
 from app.services.budget import update_open_limits
+from app.services.phone import normalize_phone
 from app.services.pricing import USD_KZT, PricingError, kzt_to_usd, load_usd_kzt_rate
 
 router = APIRouter(prefix="/api/limits", tags=["limits"], dependencies=[Depends(require_admin)])
@@ -122,7 +123,20 @@ async def update_limits(
     correlation_id = getattr(request.state, "correlation_id", None)
     current = await _current_settings(db)
     changed_budget_keys: list[str] = []
-    for name, new_value in body.settings.model_dump().items():
+    values = body.settings.model_dump()
+    # The owner types their own number the way they say it out loud
+    # ("8 701 ..."); the alert channel needs the canonical form, and a
+    # typo here means alerts quietly go nowhere.
+    raw_phone = str(values.get(app_settings.ALERT_PHONE) or "").strip()
+    if raw_phone:
+        try:
+            values[app_settings.ALERT_PHONE] = normalize_phone(raw_phone)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Номер для оповещений указан неверно",
+            ) from exc
+    for name, new_value in values.items():
         if getattr(current, name) == new_value:
             continue
         await set_setting(db, name, new_value, actor_user_id=user.id, correlation_id=correlation_id)

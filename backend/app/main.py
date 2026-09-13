@@ -21,6 +21,7 @@ from app.api import (
     limits,
     system,
     system_settings,
+    system_status,
     tags,
 )
 from app.config import Settings, get_settings
@@ -131,4 +132,5 @@ def create_app(
     app.include_router(agent.router)
     app.include_router(limits.router)
     app.include_router(analytics.router)
+    app.include_router(system_status.router)
     return app

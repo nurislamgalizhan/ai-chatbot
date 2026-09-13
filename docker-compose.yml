@@ -30,9 +30,20 @@ services:
       - -c
       - shared_buffers=128MB
       - -c
-      - max_connections=30
+      # backend (10) + worker (22) + psql for backups and maintenance.
+      - max_connections=50
       - -c
       - work_mem=8MB
+      # A query that hangs holds locks that stop the pipeline; a
+      # transaction left open by a crashed client holds them forever.
+      # These three make PostgreSQL end such a session itself instead of
+      # waiting for someone to notice the bot went quiet.
+      - -c
+      - statement_timeout=30s
+      - -c
+      - lock_timeout=10s
+      - -c
+      - idle_in_transaction_session_timeout=60s
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks: [internal]
@@ -115,6 +126,12 @@ services:
   worker:
     build: ./backend
     command: ["python", "-m", "app.worker.main"]
+    # The GREEN-API long-poll blocks for up to ~35 s; the default 10 s
+    # grace period would SIGKILL the worker mid-send on every deploy,
+    # which is exactly when a customer gets a message twice.
+    stop_grace_period: 45s
+    # PID 1 in the container must reap children and pass on signals.
+    init: true
     environment: *app-env
     networks: [internal]
     restart: unless-stopped
@@ -145,7 +162,13 @@ services:
 
   frontend:
     build: ./frontend
-    networks: [internal, edge]
+    networks:
+      internal:
+      edge:
+        # Stable name for the gateway's vhost config: container names
+        # carry the compose project prefix, and deploy/nginx/*.conf must
+        # keep working whatever the project is called.
+        aliases: [wabot-frontend]
     restart: unless-stopped
     mem_limit: 32m
     cpus: 0.1

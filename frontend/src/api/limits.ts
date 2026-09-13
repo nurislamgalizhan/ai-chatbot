@@ -26,6 +26,17 @@ export interface LimitsSettings {
   max_image_file_mb: number;
   media_retention_days: number;
   transcription_terms: string;
+  media_reply_cooldown_minutes: number;
+  alert_phone: string;
+  alerts_enabled: boolean;
+  disk_alert_percent: number;
+  queue_alert_depth: number;
+  backup_stale_hours: number;
+  retention_raw_payload_days: number;
+  retention_system_events_days: number;
+  retention_faq_misses_days: number;
+  retention_audit_log_days: number;
+  retention_transport_days: number;
 }
 
 export interface PriceItem {

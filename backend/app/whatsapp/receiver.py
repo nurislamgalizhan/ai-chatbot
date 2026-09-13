@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.models import InboundNotification, SystemEvent, WhatsappInstance
+from app.services.alerts import hour_bucket, record_alert
 from app.whatsapp.classify import IGNORED_KINDS, classify
 
 if TYPE_CHECKING:
@@ -25,6 +26,20 @@ if TYPE_CHECKING:
     from app.whatsapp.provider import RawNotification, WhatsAppProvider
 
 logger = structlog.get_logger(__name__)
+
+#: Errors whose text may contain the customer's own words: a database
+#: error carries the failing SQL and its parameters, and a provider error
+#: can echo the payload back. `last_error` is shown on the «Система»
+#: page, so only the exception TYPE crosses that line (SPEC invariant 9).
+_OPAQUE_ERRORS = ("sqlalchemy", "asyncpg", "psycopg")
+
+
+def _safe_error(error: Exception) -> str:
+    module = type(error).__module__.split(".")[0].lower()
+    if module in _OPAQUE_ERRORS:
+        return f"{type(error).__name__} (подробности в логах сервера)"
+    return str(error)[:300]
+
 
 GREEN_API_TOKEN_REF = "GREEN_API_TOKEN"  # noqa: S105  # nosec B105 - env var NAME
 
@@ -196,17 +211,29 @@ class PollingReceiver:
     async def record_poll_error(self, error: Exception) -> None:
         try:
             async with self._sessionmaker() as db:
+                detail = _safe_error(error)
                 db.add(
                     SystemEvent(
                         level="error",
                         component="receiver",
                         event="poll_failed",
-                        detail={"error": type(error).__name__, "message": str(error)[:300]},
+                        detail={"error": type(error).__name__, "message": detail},
                     )
                 )
                 instance = await db.get(WhatsappInstance, self._instance_pk)
                 if instance is not None:
-                    instance.last_error = str(error)[:300]
+                    instance.last_error = detail
+                # No incoming messages are being collected at all: the bot
+                # looks alive and answers nobody. Once an hour, so a
+                # backoff loop cannot turn one outage into a message
+                # storm on the owner's phone.
+                await record_alert(
+                    db,
+                    kind="system",
+                    event_key="poll_failed",
+                    period_key=hour_bucket(),
+                    detail={"error": type(error).__name__},
+                )
                 await db.commit()
         except Exception:
             # If the DB itself is down this would raise; the loop is already

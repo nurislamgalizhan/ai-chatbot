@@ -833,6 +833,31 @@ class MediaProcessor:
             "media_failed", message_id=job.message_id, error_code=error_code, retryable=retryable
         )
 
+    async def _said_recently(self, chat_id: int) -> bool:
+        """Has this chat already heard a service reply inside the cooldown?"""
+        async with self._deps.sessionmaker() as db:
+            minutes = int(await get_setting(db, app_settings.MEDIA_REPLY_COOLDOWN_MINUTES))
+            if minutes <= 0:
+                return False
+            recent = (
+                await db.execute(
+                    select(Message.id)
+                    .where(
+                        Message.chat_id == chat_id,
+                        Message.direction == MsgDirection.OUT,
+                        Message.answer_source == AnswerSource.SERVICE,
+                        # Only acknowledgements ABOUT FILES count: a
+                        # topic refusal three minutes ago must not
+                        # swallow the one sentence telling the customer
+                        # their voice note went to a manager.
+                        Message.correlation_id.like("%:media:%"),
+                        Message.created_at >= datetime.now(UTC) - timedelta(minutes=minutes),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            return recent is not None
+
     async def _send_service_reply(self, job: _Job, reason: str) -> None:
         """Tell the customer what happened with their file.
 
@@ -863,6 +888,14 @@ class MediaProcessor:
             ).scalar_one_or_none()
         if already is not None:
             return  # this refusal was answered — do not pay to say it twice
+
+        if await self._said_recently(job.chat_id):
+            # The customer was already told about a file minutes ago and
+            # the dialog is already flagged for a human. Composing the
+            # same sentence again costs money per file and reads as spam
+            # to the customer — a photo flood must not buy twenty of them.
+            logger.info("media_reply_suppressed", chat_id=job.chat_id)
+            return
 
         reply = await compose_service_reply(
             GenerationDeps(

@@ -1,0 +1,6 @@
+# Альтернатива systemd-таймеру, если владельцу привычнее cron.
+# Ставится в root-crontab: `sudo crontab -e`
+# Путь к репозиторию подставить свой.
+30 3 * * * cd /srv/wabot && ./deploy/backup/pg_backup.sh >> /var/log/wabot-backup.log 2>&1
+# Раз в квартал — проверка восстановимости (docs/deployment.md §5).
+15 4 1 */3 * cd /srv/wabot && ./deploy/backup/backup_verify.sh >> /var/log/wabot-backup.log 2>&1

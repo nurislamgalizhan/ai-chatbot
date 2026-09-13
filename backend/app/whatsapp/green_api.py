@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
+from httpx._client import UseClientDefault
 from pydantic import ValidationError
 
 from app.whatsapp.download_guard import DownloadNotAllowedError, check_download_url
@@ -80,7 +81,13 @@ class GreenApiProvider(WhatsAppProvider):
         *,
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
-        timeout: float | None = None,
+        # NOT `None`: in httpx, timeout=None means "wait forever". Every
+        # caller that omitted a timeout was silently asking for exactly
+        # that — and a send that hangs forever holds the outbox
+        # transaction open, so PostgreSQL eventually kills the session
+        # AFTER the customer already received the message, and the next
+        # pass sends it again.
+        timeout: float | httpx.Timeout | UseClientDefault = httpx.USE_CLIENT_DEFAULT,
     ) -> Any:  # noqa: ANN401 - provider payloads are schemaless JSON
         try:
             response = await self._client.request(
@@ -94,7 +101,15 @@ class GreenApiProvider(WhatsAppProvider):
             raise _classify_status(method_name, response.status_code)
         if not response.content:
             return None
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:
+            # 200 with a body that is not JSON: a proxy error page, a
+            # captcha, a truncated response. Not an httpx.HTTPError, so
+            # without this it escaped as a bare ValueError and the outbox
+            # killed the message as a poison row — the customer never got
+            # an answer that was merely delayed. Retryable transport.
+            raise ProviderError(method_name, status_code=None, retryable=True) from exc
 
     async def poll_notification(self) -> RawNotification | None:
         payload = await self._request(

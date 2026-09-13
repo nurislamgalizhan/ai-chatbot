@@ -72,6 +72,12 @@ APP_TABLES = (
 )
 
 
+#: Set when the tests run against their own PostgreSQL container: the
+#: backup/restore test needs to run pg_dump INSIDE it, which an external
+#: database (TEST_DATABASE_URL) does not allow.
+_PG_CONTAINER: list[object] = []
+
+
 @pytest.fixture(scope="session")
 def database_url() -> AsyncIterator[str]:
     external = os.environ.get("TEST_DATABASE_URL")
@@ -81,7 +87,18 @@ def database_url() -> AsyncIterator[str]:
     from testcontainers.postgres import PostgresContainer
 
     with PostgresContainer("pgvector/pgvector:pg16", driver="asyncpg") as pg:
+        _PG_CONTAINER.append(pg)
         yield pg.get_connection_url()
+        _PG_CONTAINER.clear()
+
+
+@pytest.fixture(scope="session")
+def pg_container(database_url: str) -> object:
+    """The running PostgreSQL container, for tests that need to execute
+    pg_dump/pg_restore rather than talk SQL."""
+    if not _PG_CONTAINER:
+        pytest.skip("backup tests need the managed PostgreSQL container")
+    return _PG_CONTAINER[0]
 
 
 @pytest.fixture(scope="session")

@@ -9,6 +9,7 @@ from collections.abc import MutableMapping
 from typing import TYPE_CHECKING, Any
 
 import structlog
+import structlog.tracebacks
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
@@ -47,7 +48,16 @@ def configure_logging(settings: Settings) -> None:
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             _redact,
-            structlog.processors.dict_tracebacks,
+            # show_locals=False is NOT a detail: structlog's default
+            # traceback renderer dumps every frame's local variables into
+            # the log line. That means the GREEN-API token inside the
+            # provider, the customer's message text and their phone —
+            # written out in full on every logger.exception, straight
+            # past the redaction above, which only sees event keys
+            # (SPEC §2.7 secrets, §2.9 no PII in logs).
+            structlog.processors.ExceptionRenderer(
+                structlog.tracebacks.ExceptionDictTransformer(show_locals=False)
+            ),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
