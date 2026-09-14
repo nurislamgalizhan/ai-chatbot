@@ -76,8 +76,12 @@ async def login(
             db, settings, phone, body.password, ip, _correlation_id(request)
         )
     except auth_flow.AccountLocked as exc:
-        await db.commit()  # persist the audit record despite the 429
-        raise _TOO_MANY from exc
+        # Same status and body as a wrong password: a 429 only for the
+        # real account would tell an attacker which phone is the admin's.
+        await db.commit()  # persist the audit record
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=auth_flow.LoginRejected.detail
+        ) from exc
     except auth_flow.LoginRejected as exc:
         await db.commit()  # persist failed_login_count / lockout / audit
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc

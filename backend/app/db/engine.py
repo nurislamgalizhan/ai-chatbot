@@ -28,6 +28,10 @@ def build_engine(settings: Settings, *, pool_size: int = 5, max_overflow: int = 
         pool_size=pool_size,
         max_overflow=max_overflow,
         pool_pre_ping=True,
+        # A database error renders "[SQL: ...] [parameters: ...]" into its
+        # message, and the parameters of a failing INSERT are the
+        # customer's text and phone. logger.exception would print them.
+        hide_parameters=True,
         # Fail loudly instead of hanging half a minute per call when the
         # pool is exhausted; every caller here already handles an error.
         pool_timeout=10,

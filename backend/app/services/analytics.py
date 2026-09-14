@@ -21,7 +21,8 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ColumnElement, Numeric, case, cast, func, select
+from sqlalchemy import ColumnElement, Numeric, and_, case, cast, func, select
+from sqlalchemy.orm import aliased
 
 from app.models import AiCall, BudgetLedger, Chat, KbFaq, KbFaqMiss, Message
 from app.models.enums import (
@@ -284,14 +285,34 @@ async def workload(db: AsyncSession, period: Period) -> dict[str, int]:
     have been answered — ignored ones (stale, spam, stickers) are not
     failures of the bot and would drag the number down dishonestly.
     """
+    reply = aliased(Message)
     rows = (
         await db.execute(
-            select(Message.direction, Message.source, Message.state, func.count())
+            select(
+                Message.direction,
+                Message.source,
+                Message.state,
+                reply.answer_source,
+                func.count(),
+            )
+            .select_from(Message)
+            # The reply to a customer message shares its correlation id;
+            # its answer_source says whether the bot answered (model, FAQ,
+            # cache) or only phrased a handoff (service).
+            .outerjoin(
+                reply,
+                and_(
+                    Message.direction == MsgDirection.IN,
+                    reply.correlation_id == Message.correlation_id,
+                    reply.direction == MsgDirection.OUT,
+                    reply.source == MsgSource.AI,
+                ),
+            )
             .where(
                 Message.created_at >= period.start_at,
                 Message.created_at < period.end_at,
             )
-            .group_by(Message.direction, Message.source, Message.state)
+            .group_by(Message.direction, Message.source, Message.state, reply.answer_source)
         )
     ).all()
 
@@ -301,13 +322,19 @@ async def workload(db: AsyncSession, period: Period) -> dict[str, int]:
     ignored = 0
     by_panel = 0
     by_phone = 0
-    for direction, source, state, raw_count in rows:
+    for direction, source, state, answer_source, raw_count in rows:
         amount = int(raw_count)
         if direction is MsgDirection.IN and source is MsgSource.CUSTOMER:
             incoming += amount
-            if state is MsgState.ANSWERED:
+            if state is MsgState.ANSWERED and answer_source is AnswerSource.SERVICE:
+                # «Передал менеджеру» composed by the model is not an
+                # answer — the customer still waits for a human.
+                handed_to_human += amount
+            elif state is MsgState.ANSWERED:
                 answered_by_ai += amount
-            elif state is MsgState.HANDED_TO_HUMAN:
+            elif state in (MsgState.HANDED_TO_HUMAN, MsgState.FAILED_FINAL):
+                # A processing failure is the bot's failure to automate,
+                # not "never answerable": it counts against automation.
                 handed_to_human += amount
             elif state in (MsgState.IGNORED, MsgState.BLOCKED_BY_LIMIT):
                 ignored += amount

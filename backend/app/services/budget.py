@@ -19,7 +19,7 @@ Concurrency rules (from the phase 6 design review):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -72,13 +72,16 @@ class ReserveOutcome:
 
 
 def _month_bounds(day: date) -> tuple[date, date]:
+    """First and LAST day of the month — inclusive, like the day scopes,
+    because every reader compares `period_end >= today`. An exclusive end
+    made the closed month match again on the 1st."""
     start = day.replace(day=1)
-    end = (
+    next_month = (
         start.replace(year=start.year + 1, month=1)
         if start.month == 12  # noqa: PLR2004
         else start.replace(month=start.month + 1)
     )
-    return start, end
+    return start, next_month - timedelta(days=1)
 
 
 def build_scopes(chat_id: int | None, phone: str | None, now: datetime) -> list[ScopeSpec]:
@@ -88,10 +91,10 @@ def build_scopes(chat_id: int | None, phone: str | None, now: datetime) -> list[
     UI states this explicitly.
     """
     day = now.astimezone(UTC).date()
-    month_start, next_month = _month_bounds(day)
+    month_start, month_end = _month_bounds(day)
     specs = [
         ScopeSpec(BudgetScope.GLOBAL_DAY, day.isoformat(), day, day),
-        ScopeSpec(BudgetScope.GLOBAL_MONTH, day.strftime("%Y-%m"), month_start, next_month),
+        ScopeSpec(BudgetScope.GLOBAL_MONTH, day.strftime("%Y-%m"), month_start, month_end),
     ]
     if chat_id is not None:
         specs.append(
@@ -156,7 +159,12 @@ async def reserve(
     async with sessionmaker() as db:
         rate = await load_usd_kzt_rate(db, moment)  # PricingError -> fail closed
         ledger_ids = await _ensure_ledgers(db, specs, rate)
-        for spec in specs:
+        # Lock order = ledger id, the same order settle/release/sweep use
+        # (`ORDER BY id FOR UPDATE`). Two orders — Python sort by scope
+        # name here, enum declaration order there — let a reservation and
+        # a settlement on the same chat deadlock, and the settle that lost
+        # released the hold as if nothing had been spent.
+        for spec in sorted(specs, key=lambda s: ledger_ids[s]):
             ledger_id = ledger_ids[spec]
             inserted = (
                 await db.execute(
@@ -218,7 +226,8 @@ async def _close_holds(
     final_status: ReservationStatus,
 ) -> int:
     """Move held reservations to a terminal status; idempotent because a
-    retried call finds no 'held' rows. Locks follow the canonical order."""
+    retried call finds no 'held' rows. Locks follow the canonical order
+    (ledger id — the same order `reserve` takes them in)."""
     rows = (
         await db.execute(
             select(BudgetReservation, BudgetLedger)
@@ -227,7 +236,7 @@ async def _close_holds(
                 BudgetReservation.correlation_id == sub_correlation,
                 BudgetReservation.status == ReservationStatus.HELD,
             )
-            .order_by(BudgetLedger.scope, BudgetLedger.scope_key)
+            .order_by(BudgetLedger.id)
             .with_for_update()
         )
     ).all()
@@ -289,7 +298,7 @@ async def sweep_stale_holds(
                     BudgetReservation.status == ReservationStatus.HELD,
                     BudgetReservation.created_at < older_than,
                 )
-                .order_by(BudgetLedger.scope, BudgetLedger.scope_key)
+                .order_by(BudgetLedger.id)
                 .with_for_update(skip_locked=True)
             )
         ).all()

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from redis.asyncio import Redis
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,8 +28,9 @@ from app.schemas.system_status import (
     RecoveryCodesResponse,
     RecoveryCodesStatusResponse,
 )
+from app.security import rate_limit
 from app.security.audit import record_audit
-from app.security.deps import client_ip, current_session, get_db, require_admin
+from app.security.deps import client_ip, current_session, get_db, get_redis, require_admin
 from app.security.passwords import (
     hash_password,
     validate_password_strength,
@@ -50,15 +53,48 @@ async def get_account(
     )
 
 
+#: Wrong current-password attempts one session may make in 15 minutes.
+#: These endpoints change the password and mint recovery codes (a way
+#: around the second factor): a stolen cookie must not be able to
+#: dictionary-attack the password against them.
+_REAUTH_ATTEMPTS = 5
+_REAUTH_WINDOW_SECONDS = 900
+
+
+async def _reauthenticate(
+    db: AsyncSession, redis: Redis, request: Request, user: AdminUser, current_password: str
+) -> None:
+    allowed = await rate_limit.allow(
+        redis, f"rl:reauth:{user.id}", _REAUTH_ATTEMPTS, _REAUTH_WINDOW_SECONDS
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Слишком много попыток — подождите 15 минут",
+        )
+    if not await asyncio.to_thread(verify_password, user.password_hash, current_password):
+        await record_audit(
+            db,
+            action="account.reauth_failed",
+            actor_user_id=user.id,
+            entity_type="admin_user",
+            entity_id=str(user.id),
+            ip=client_ip(request),
+            correlation_id=getattr(request.state, "correlation_id", None),
+        )
+        await db.commit()  # the audit row survives the 403
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Текущий пароль неверен")
+
+
 @router.post("/change-password", response_model=OkResponse)
 async def change_password(
     body: ChangePasswordRequest,
     request: Request,
     user: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)],
 ) -> OkResponse:
-    if not verify_password(user.password_hash, body.current_password):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Текущий пароль неверен")
+    await _reauthenticate(db, redis, request, user, body.current_password)
     error = validate_password_strength(body.new_password)
     if error:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=error)
@@ -298,6 +334,7 @@ async def regenerate_recovery_codes(
     request: Request,
     user: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)],
 ) -> RecoveryCodesResponse:
     """Issue a fresh set and invalidate the old one.
 
@@ -306,8 +343,7 @@ async def regenerate_recovery_codes(
     someone a permanent way back in. Shown exactly once — only argon2
     hashes are stored, so nobody, including us, can print them again.
     """
-    if not verify_password(user.password_hash, body.current_password):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Текущий пароль неверен")
+    await _reauthenticate(db, redis, request, user, body.current_password)
     await db.execute(delete(TotpRecoveryCode).where(TotpRecoveryCode.user_id == user.id))
     codes = generate_recovery_codes()
     for code in codes:

@@ -219,7 +219,7 @@ export default function CostsPage() {
                   <td>{row.calls}</td>
                   <td>{money(row.cost_kzt)}</td>
                   <td>
-                    <Link to={`/?chat=${row.chat_id}`}>Открыть чат</Link>
+                    <Link to={`/chats?chat=${row.chat_id}`}>Открыть чат</Link>
                   </td>
                 </tr>
               ))}

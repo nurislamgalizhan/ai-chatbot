@@ -6,10 +6,10 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from app.models import Chat, Message
+from app.models import Chat, ChatMemory, Message
 from app.models.enums import (
     AttentionClearedReason,
     AttentionReason,
@@ -169,6 +169,13 @@ async def clear_attention(
     chat.needs_attention = False
     chat.attention_cleared_at = _now()
     chat.attention_cleared_reason = reason.value
+    # The memory flag told the model "a manager has been asked for"; once
+    # a human has looked, it would otherwise stay true forever.
+    await db.execute(
+        update(ChatMemory)
+        .where(ChatMemory.chat_id == chat.id, ChatMemory.handoff_required.is_(True))
+        .values(handoff_required=False)
+    )
     await record_audit(
         db,
         action="chat.attention_cleared",

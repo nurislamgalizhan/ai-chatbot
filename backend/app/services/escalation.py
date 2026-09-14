@@ -13,8 +13,12 @@ word lists:
 
 The answer still goes out (the FAQ text or the model's reply); the
 dialog additionally gets `needs_attention`, which is how the manager
-finds it. Word-prefix matching handles Russian/Kazakh morphology
-(бронь / забронировать / бронирование) without a stemmer.
+finds it.
+
+Matching is by WHOLE normalized words, never by prefix: the first
+version used prefixes and fired on «бронежилет», «бронзовая медаль»,
+«резервуар» and «административное здание» — everyday words for a
+guard-training centre with a sports hall.
 """
 
 from __future__ import annotations
@@ -24,47 +28,94 @@ from app.services.kb_text import normalize_query
 HUMAN_REQUESTED = "human_requested"
 BOOKING = "booking"
 
-#: Cyrillic word prefixes: a word STARTING with one of these counts.
-_HUMAN_PREFIXES = (
-    "администратор",
-    "админ",
-    "менеджер",
-    "оператор",
-    "әкімші",
-    "басшы",
+_HUMAN_WORDS = frozenset(
+    {
+        # ru — a person, in the cases a customer actually uses
+        "администратор",
+        "администратора",
+        "администратору",
+        "администратором",
+        "администраторы",
+        "менеджер",
+        "менеджера",
+        "менеджеру",
+        "менеджером",
+        "менеджеры",
+        # nominative «оператор» is left out: «оператор связи не ловит»
+        "оператора",
+        "оператору",
+        "оператором",
+        # kk
+        "әкімші",
+        "әкімшіні",
+        "әкімшіге",
+        "әкімшімен",
+        "менеджерге",
+        "менеджермен",
+        "операторға",
+        # en
+        "manager",
+        "administrator",
+    }
 )
-#: Whole phrases matched inside the normalized text ("человек" alone
+#: Whole phrases matched inside the normalized text («человек» alone
 #: would fire on «зал на 20 человек»).
 _HUMAN_PHRASES = (
     "живой человек",
-    "с человеком",
     "живым человеком",
-    "адаммен",
+    "с человеком",
+    "адаммен сөйлес",
     "talk to a human",
+    "talk to a person",
     "real person",
     "speak to someone",
 )
-_HUMAN_WORDS_LATIN = frozenset({"manager", "administrator", "operator", "human"})
 
-_BOOKING_PREFIXES = (
-    "брон",
-    "заброн",
-    "переброн",
-    "резерв",
-    "зарезерв",
-    "заявк",
-    "записат",
-    "записыв",
-    "запиши",
-    "запишите",
-    "брондау",
-    "брондап",
-    "тапсырыс",
-    "тіркел",
-    "жазыл",
-)
-_BOOKING_WORDS_LATIN = frozenset(
-    {"book", "booking", "reserve", "reservation", "appointment", "enroll", "enrol", "register"}
+_BOOKING_WORDS = frozenset(
+    {
+        # ru — бронь / бронирование / записаться / заявка
+        "бронь",
+        "брони",
+        "бронью",
+        "бронирование",
+        "бронирования",
+        "бронировать",
+        "забронировать",
+        "забронируйте",
+        "забронирую",
+        "забронируем",
+        "перебронировать",
+        "зарезервировать",
+        "зарезервируйте",
+        "заявка",
+        "заявку",
+        "заявки",
+        "записаться",
+        "запишите",
+        "запиши",
+        "записать",
+        "запишусь",
+        # kk
+        "брондау",
+        "брондаңыз",
+        "брондап",
+        "тапсырыс",
+        "жазылу",
+        "жазылғым",
+        "жазылайын",
+        "жазыңыз",
+        "тіркелу",
+        "тіркеңіз",
+        # en
+        "book",
+        "booking",
+        "reserve",
+        "reservation",
+        "appointment",
+        "enroll",
+        "enrol",
+        "register",
+    }
 )
 _BOOKING_PHRASES = ("sign up", "sign me up")
 
@@ -74,13 +125,9 @@ def escalation_reason(text: str) -> str | None:
     normalized = normalize_query(text)
     if not normalized:
         return None
-    words = normalized.split()
-    if any(phrase in normalized for phrase in _HUMAN_PHRASES) or any(
-        word.startswith(_HUMAN_PREFIXES) or word in _HUMAN_WORDS_LATIN for word in words
-    ):
+    words = set(normalized.split())
+    if words & _HUMAN_WORDS or any(phrase in normalized for phrase in _HUMAN_PHRASES):
         return HUMAN_REQUESTED
-    if any(phrase in normalized for phrase in _BOOKING_PHRASES) or any(
-        word.startswith(_BOOKING_PREFIXES) or word in _BOOKING_WORDS_LATIN for word in words
-    ):
+    if words & _BOOKING_WORDS or any(phrase in normalized for phrase in _BOOKING_PHRASES):
         return BOOKING
     return None

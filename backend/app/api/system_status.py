@@ -11,7 +11,7 @@ characters (SPEC §12.9).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 import structlog
@@ -73,7 +73,13 @@ async def status(
         await db.execute(
             select(func.count())
             .select_from(AlertNotification)
-            .where(AlertNotification.status == "failed")
+            .where(
+                AlertNotification.status == "failed",
+                # A window, not a lifetime: retention never deletes
+                # failed rows, so an outage a year ago would otherwise
+                # be reported forever.
+                AlertNotification.created_at >= datetime.now(UTC) - timedelta(days=7),
+            )
         )
     ).scalar_one()
     last_alerts = (
@@ -277,7 +283,7 @@ async def test_alert(db: Annotated[AsyncSession, Depends(get_db)]) -> TestAlertR
     """
     phone = str(await get_setting(db, app_settings.ALERT_PHONE) or "").strip()
     enabled = bool(await get_setting(db, app_settings.ALERTS_ENABLED))
-    await record_alert(
+    created = await record_alert(
         db,
         kind="system",
         event_key="test",
@@ -287,6 +293,8 @@ async def test_alert(db: Annotated[AsyncSession, Depends(get_db)]) -> TestAlertR
     await db.commit()
     # An honest answer: a button that always says "sent" teaches the
     # owner to trust a channel that may not be configured at all.
+    if not created:
+        return TestAlertResponse(queued=False, will_send=False, reason="already_queued")
     if not phone:
         return TestAlertResponse(queued=True, will_send=False, reason="no_phone")
     if not enabled:

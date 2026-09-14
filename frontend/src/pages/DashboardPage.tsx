@@ -108,7 +108,7 @@ export default function DashboardPage() {
           </div>
         </div>
         <div className="actions-row">
-          <Link className="btn-link" to="/?needs_attention=1">
+          <Link className="btn-link" to="/chats?filter=attention">
             <Icon name="chat" size={15} /> Открыть чаты, ждущие ответа
           </Link>
           <Link className="btn-link" to="/knowledge">

@@ -41,6 +41,14 @@ def test_requests_for_a_person_or_a_booking_are_recognised(text: str, reason: st
         "I lost my notebook at the gym",
         "",
         "👍",
+        # Whole words, not prefixes: everyday words of a guard-training
+        # centre with a sports hall must not summon a manager.
+        "Есть ли у вас бронежилеты для тренировок?",
+        "Где административное здание?",
+        "Взял бронзовую медаль на соревнованиях",
+        "Резервуар для воды в зале есть?",
+        "Можно записывать лекции на телефон?",
+        "Оператор связи не ловит в зале",
     ],
 )
 def test_ordinary_questions_are_not_escalated(text: str) -> None:

@@ -15,11 +15,12 @@ async def test_lockout_after_repeated_failures(client, settings, admin_factory) 
         )
         assert response.status_code == 401
 
-    # Locked now: even the CORRECT password is rejected.
+    # Locked now: even the CORRECT password is rejected — with the SAME
+    # 401 a wrong password gets, so the lock does not reveal the account.
     response = await client.post(
         "/api/auth/login", json={"phone": admin.phone, "password": TEST_PASSWORD}
     )
-    assert response.status_code == 429
+    assert response.status_code == 401
 
 
 async def test_ip_rate_limit_on_login(client, settings, admin_factory) -> None:

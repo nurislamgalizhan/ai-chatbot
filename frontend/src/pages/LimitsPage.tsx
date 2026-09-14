@@ -92,8 +92,8 @@ export default function LimitsPage() {
     },
   });
 
-  if (limits.isPending || !form) return <div className="empty">Загрузка…</div>;
   if (limits.isError) return <div className="error">Не удалось загрузить лимиты</div>;
+  if (limits.isPending || !form) return <div className="empty">Загрузка…</div>;
   const data = limits.data;
   const rate = data.usd_kzt_rate;
   const update = (patch: Partial<LimitsSettings>) =>
@@ -408,7 +408,7 @@ export default function LimitsPage() {
             onChange={(v) => update({ max_audio_file_mb: v })}
           />
           <NumberField
-            label="Фото на диалог"
+            label="Фото на диалог (за всё время)"
             value={form.max_images_per_dialog}
             onChange={(v) => update({ max_images_per_dialog: v })}
           />

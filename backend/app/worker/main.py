@@ -168,6 +168,10 @@ async def _domain_sync_loop(
         try:
             async with sessionmaker() as db:
                 handled += await process_inbound_batch(db)
+                await db.commit()
+            # Own transaction: a reconcile problem must never roll back
+            # customer messages that were just parsed.
+            async with sessionmaker() as db:
                 handled += await reconcile_outbox(db)
                 await db.commit()
         except Exception:

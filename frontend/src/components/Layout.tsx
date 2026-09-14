@@ -12,6 +12,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/agent": "Агент",
   "/knowledge": "База знаний",
   "/limits": "Лимиты",
+  "/system": "Система",
   "/account": "Учётная запись",
 };
 
@@ -51,6 +52,7 @@ function initials(name: string): string {
  * dead links are forbidden by SPEC §0.2. */
 export default function Layout() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { pathname } = useLocation();
   // Same query key as RequireAuth: served from cache, no extra request.
   const account = useQuery({ queryKey: ["account"], queryFn: getAccount });
@@ -59,6 +61,8 @@ export default function Layout() {
     try {
       await logout();
     } finally {
+      // Nothing from this session may survive into the next login.
+      queryClient.clear();
       navigate("/login", { replace: true });
     }
   }

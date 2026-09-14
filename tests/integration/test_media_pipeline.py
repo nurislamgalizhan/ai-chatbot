@@ -19,6 +19,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from PIL import Image
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.ai.chat_provider import ChatError, FakeChatProvider, make_result
 from app.ai.transcription import (
     FakeTranscriptionProvider,
@@ -42,9 +46,6 @@ from app.services.app_settings import set_setting
 from app.services.media_processing import MediaDeps, MediaProcessor, enqueue_media_job
 from app.services.pricing import seed_default_prices
 from app.whatsapp.provider import ProviderError, WhatsAppProvider
-from PIL import Image
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 TRANSCRIPT = "Здравствуйте, сколько стоит абонемент в тренажерный зал?"
 DESCRIPTION = "На фото стойка администратора с прайс-листом."
@@ -554,11 +555,165 @@ async def test_failed_transcription_releases_the_reservation_and_retries(
                 select(BudgetLedger).where(BudgetLedger.scope == BudgetScope.GLOBAL_DAY)
             )
         ).scalar_one()
-        call = (await db.execute(select(AiCall))).scalars().one()
+        calls = (await db.execute(select(AiCall))).scalars().all()
     # Nothing was spent, and the estimate is not stuck as reserved.
     assert day.spent_usd == 0
     assert day.reserved_usd == 0
+    # A definite provider rejection (HTTP status) was not billed: the
+    # barrier row is gone so the promised retry can make the call.
+    assert calls == []
+
+
+async def test_a_retry_after_a_provider_error_transcribes_without_a_second_download(
+    media_env,
+) -> None:
+    """The retry used to hit the double-pay barrier left by the failed
+    attempt and end in a false «already paid»; it also downloaded and
+    stored the file a second time."""
+    maker = media_env["maker"]
+    media_env["transcription"].script = [
+        ChatError("transcription_failed:http_503", retryable=True),
+        TranscriptionResult(text=TRANSCRIPT, model="gpt-transcribe", latency_ms=90),
+    ]
+    chat_id = await make_chat(maker, media_env["instance_pk"])
+    message_id = await add_media_message(maker, chat_id)
+
+    await media_env["processor"].run_once()
+    first_ref = (await get_message(maker, message_id)).media_ref
+    assert first_ref is not None
+    async with maker() as db, db.begin():
+        job = (
+            await db.execute(select(MediaJob).where(MediaJob.message_id == message_id))
+        ).scalar_one()
+        job.next_attempt_at = None  # skip the backoff wait
+    await media_env["processor"].run_once()
+
+    message = await get_message(maker, message_id)
+    assert message.transcript == TRANSCRIPT
+    assert message.state is MsgState.QUEUED  # answered by the AI pipeline next
+    assert message.media_ref == first_ref  # reused, not stored twice
+    assert len(media_env["download"].calls) == 1  # not downloaded twice
+    async with maker() as db:
+        calls = (await db.execute(select(AiCall))).scalars().all()
+    assert [c.status for c in calls] == ["ok"]
+
+
+async def test_an_ambiguous_failure_keeps_the_double_pay_barrier(media_env) -> None:
+    """A timeout may have been billed: the retry must not pay again —
+    the file goes to a human as «already paid» instead."""
+    maker = media_env["maker"]
+    media_env["transcription"].script = [
+        ChatError("transcription_failed:APITimeoutError", retryable=True),
+        TranscriptionResult(text=TRANSCRIPT, model="gpt-transcribe", latency_ms=90),
+    ]
+    chat_id = await make_chat(maker, media_env["instance_pk"])
+    message_id = await add_media_message(maker, chat_id)
+
+    await media_env["processor"].run_once()
+    async with maker() as db, db.begin():
+        job = (
+            await db.execute(select(MediaJob).where(MediaJob.message_id == message_id))
+        ).scalar_one()
+        job.next_attempt_at = None
+    await media_env["processor"].run_once()
+
+    message = await get_message(maker, message_id)
+    assert message.state is MsgState.HANDED_TO_HUMAN
+    assert message.error_code == "already_charged"
+    assert len(media_env["transcription"].requests) == 1  # the second call never happened
+
+
+async def test_a_billed_but_empty_vision_result_is_booked_not_released(media_env) -> None:
+    """HTTP 200 with no text still costs the image tokens: the spend is
+    booked and settled, the photo goes to a human WITH a reply."""
+    from app.ai.chat_provider import ChatUsage
+
+    maker = media_env["maker"]
+    media_env["chat_provider"].vision_script = [
+        ChatError(
+            "chat_failed:empty_response",
+            retryable=True,
+            usage=ChatUsage(input_tokens=1500, output_tokens=0, reasoning_tokens=200),
+        )
+    ]
+    media_env["download"].payload = make_jpeg()
+    chat_id = await make_chat(maker, media_env["instance_pk"])
+    message_id = await add_media_message(
+        maker, chat_id, media_type=MediaType.IMAGE, mime_type="image/jpeg"
+    )
+
+    await media_env["processor"].run_once()
+
+    async with maker() as db:
+        call = (
+            await db.execute(select(AiCall).where(AiCall.call_type == CallType.VISION))
+        ).scalar_one()
+        day = (
+            await db.execute(
+                select(BudgetLedger).where(BudgetLedger.scope == BudgetScope.GLOBAL_DAY)
+            )
+        ).scalar_one()
+        chat = await db.get(Chat, chat_id)
     assert call.status == "error"
+    assert call.input_tokens == 1500
+    assert call.cost_usd > 0
+    # The ledger also carries the (paid) sentence telling the customer.
+    assert day.spent_usd >= call.cost_usd
+    assert day.reserved_usd == 0
+    assert chat.total_cost_usd >= call.cost_usd
+    message = await get_message(maker, message_id)
+    assert message.state is MsgState.HANDED_TO_HUMAN
+    assert [r.body for r in await get_replies(maker, chat_id)] == [SERVICE]
+
+
+async def test_voice_without_caption_lets_the_transcriber_detect_the_language(
+    media_env,
+) -> None:
+    """No caption, nothing remembered: the transcriber is NOT told «ru» —
+    that is how Kazakh voice notes came back as Russian text."""
+    maker = media_env["maker"]
+    chat_id = await make_chat(maker, media_env["instance_pk"])
+    await add_media_message(maker, chat_id)
+
+    await media_env["processor"].run_once()
+
+    request: TranscriptionRequest = media_env["transcription"].requests[0]
+    assert request.language is None
+
+
+async def test_voice_language_comes_from_the_chat_memory(media_env) -> None:
+    from app.models import ChatMemory
+
+    maker = media_env["maker"]
+    chat_id = await make_chat(maker, media_env["instance_pk"])
+    async with maker() as db, db.begin():
+        db.add(ChatMemory(chat_id=chat_id, language="kk"))
+    await add_media_message(maker, chat_id)
+
+    await media_env["processor"].run_once()
+
+    request: TranscriptionRequest = media_env["transcription"].requests[0]
+    assert request.language == "kk"
+
+
+async def test_provider_duration_longer_than_the_header_is_what_is_billed(media_env) -> None:
+    """A container whose header claims 8 s while the provider transcribed
+    30 s is booked for 30: the money left for 30."""
+    maker = media_env["maker"]
+    media_env["transcription"].script = [
+        TranscriptionResult(
+            text=TRANSCRIPT, model="gpt-transcribe", latency_ms=90, duration_seconds=30.0
+        )
+    ]
+    chat_id = await make_chat(maker, media_env["instance_pk"])
+    await add_media_message(maker, chat_id)
+
+    await media_env["processor"].run_once()
+
+    async with maker() as db:
+        call = (await db.execute(select(AiCall))).scalars().one()
+    assert call.audio_seconds == 30
+    assert call.cost_usd == Decimal("0.00225000")  # 30 s at $0.0045/min
 
 
 async def test_retries_are_bounded_and_end_with_a_human(media_env) -> None:
@@ -590,7 +745,8 @@ async def test_retries_are_bounded_and_end_with_a_human(media_env) -> None:
 
 async def test_empty_transcript_is_terminal_not_an_infinite_loop(media_env) -> None:
     """We paid and got nothing (silence). Paying again would change
-    nothing, so the message becomes a human's job."""
+    nothing, so the message becomes a human's job — and the customer is
+    told, never left in silence."""
     maker = media_env["maker"]
     media_env["transcription"].script = [
         TranscriptionResult(text="   ", model="gpt-transcribe", latency_ms=10)
@@ -606,6 +762,8 @@ async def test_empty_transcript_is_terminal_not_an_infinite_loop(media_env) -> N
     job = await get_job(maker, message_id)
     assert job.state is MediaJobState.FAILED
     assert await media_env["processor"].run_once() == 0  # nothing left to claim
+    # Never silence: the customer is told their voice note went to a person.
+    assert [r.body for r in await get_replies(maker, chat_id)] == [SERVICE]
 
 
 async def test_operator_media_is_never_processed(media_env) -> None:

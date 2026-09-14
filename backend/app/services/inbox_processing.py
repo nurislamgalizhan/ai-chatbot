@@ -13,10 +13,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import DBAPIError
 
-from app.models import Chat, InboundNotification, Message, SystemEvent, WaOutbox
+from app.models import Chat, InboundNotification, Message, SystemEvent, WaOutbox, WhatsappInstance
 from app.models.enums import (
     AttentionClearedReason,
     AttentionReason,
@@ -167,7 +167,8 @@ async def _process_one(db: AsyncSession, row: InboundNotification) -> None:
         await _handle_delivery_status(db, body)
     elif classified.kind is Kind.QUOTA_EXCEEDED:
         await _handle_quota_exceeded(db, body)
-    # INSTANCE_EVENT rows stay as raw history for the status page.
+    elif classified.kind is Kind.INSTANCE_EVENT:
+        await _handle_instance_event(db, row, body)
 
 
 async def _handle_incoming(
@@ -314,6 +315,51 @@ async def _handle_quota_exceeded(db: AsyncSession, body: dict[str, Any]) -> None
     logger.error("provider_quota_exceeded", **detail)
 
 
+#: Instance states in which the bot can work. Anything else (notAuthorized,
+#: blocked, sleepMode, starting) means the number is not talking to WhatsApp.
+_HEALTHY_INSTANCE_STATES = frozenset({"authorized", "online"})
+
+
+async def _handle_instance_event(
+    db: AsyncSession, row: InboundNotification, body: dict[str, Any]
+) -> None:
+    """The number logged out (or came back): record it where the owner
+    can see it. These notifications used to be stored as raw history
+    that nothing displayed — the bot kept "sending" into a queue the
+    provider holds for 24 hours while the owner learned nothing."""
+    state = str(
+        body.get("stateInstance")
+        or body.get("statusInstance")
+        or _dict_get(body, "stateInstanceData", "stateInstance")
+        or _dict_get(body, "statusInstanceData", "statusInstance")
+        or ""
+    ).strip()
+    if not state:
+        return
+    instance = await db.get(WhatsappInstance, row.instance_id)
+    if instance is not None:
+        instance.state = state[:50]
+        instance.state_checked_at = datetime.now(UTC)
+    healthy = state in _HEALTHY_INSTANCE_STATES
+    db.add(
+        SystemEvent(
+            level="info" if healthy else "critical",
+            component="transport",
+            event="instance_state_changed",
+            detail={"state": state[:50]},
+        )
+    )
+    if not healthy:
+        await record_alert(
+            db,
+            kind="system",
+            event_key="instance_state",
+            period_key=hour_bucket(),
+            detail={"state": state[:50]},
+        )
+        logger.error("instance_state_unhealthy", state=state[:50])
+
+
 async def _handle_operator_phone(
     db: AsyncSession, row: InboundNotification, body: dict[str, Any]
 ) -> None:
@@ -393,20 +439,14 @@ _YELLOW_CARD = "yellowCard"
 async def _handle_delivery_status(db: AsyncSession, body: dict[str, Any]) -> None:
     id_message = body.get("idMessage")
     status = body.get("status")
-    if not id_message or not isinstance(status, str):
+    if not isinstance(status, str):
         return
-    message = (
-        await db.execute(
-            select(Message).where(Message.provider_message_id == str(id_message)).limit(1)
-        )
-    ).scalar_one_or_none()
-    if message is None:
-        return
-    message.delivery_status = status[:50]
 
     if status == _YELLOW_CARD:
-        # Recorded and alerted: losing this number takes the whole bot
-        # down, and the owner can only react if they are told.
+        # About the NUMBER, not a message: alerted whether or not the
+        # message it rode in on can be matched (an owner alert, a send
+        # whose response carried no id). Losing this number takes the
+        # whole bot down, and the owner can only react if they are told.
         db.add(
             SystemEvent(
                 level="critical",
@@ -419,24 +459,48 @@ async def _handle_delivery_status(db: AsyncSession, body: dict[str, Any]) -> Non
         logger.error("number_suspended", status=status)
         return
 
+    if not id_message:
+        return
+    message = (
+        await db.execute(
+            select(Message).where(Message.provider_message_id == str(id_message)).limit(1)
+        )
+    ).scalar_one_or_none()
+    if message is not None:
+        message.delivery_status = status[:50]
     if status not in _FAILED_STATUSES:
         return
 
     # The answer was written, sent, and never arrived. Nobody would ever
-    # notice: the panel used to store the status and show nothing.
-    chat = await db.get(Chat, message.chat_id)
+    # notice: the panel used to store the status and show nothing. When
+    # the message itself cannot be matched, the chat still can — the
+    # status carries the customer's chat id.
+    chat: Chat | None = None
+    correlation_id: str | None = None
+    if message is not None:
+        chat = await db.get(Chat, message.chat_id)
+        correlation_id = message.correlation_id
+    else:
+        wa_chat_id = str(body.get("chatId") or _dict_get(body, "senderData", "chatId") or "")
+        if wa_chat_id:
+            chat = (
+                await db.execute(select(Chat).where(Chat.wa_chat_id == wa_chat_id).limit(1))
+            ).scalar_one_or_none()
     if chat is not None:
-        await set_attention(db, chat, AttentionReason.PROCESSING_ERROR, message.correlation_id)
+        await set_attention(db, chat, AttentionReason.PROCESSING_ERROR, correlation_id)
     db.add(
         SystemEvent(
             level="error",
             component="transport",
             event="delivery_failed",
-            detail={"status": status, "chat_id": message.chat_id},
-            correlation_id=message.correlation_id,
+            detail={"status": status, "chat_id": chat.id if chat is not None else None},
+            correlation_id=correlation_id,
         )
     )
-    logger.warning("delivery_failed", status=status, chat_id=message.chat_id)
+    logger.warning("delivery_failed", status=status, chat_id=chat.id if chat else None)
+
+
+_DRY_RUN_DELIVERY = "skipped_dry_run"
 
 
 async def reconcile_outbox(db: AsyncSession) -> int:
@@ -444,6 +508,11 @@ async def reconcile_outbox(db: AsyncSession) -> int:
 
     Keeps transport decoupled from the domain: the flusher only touches
     wa_outbox; this reconciler owns the message-side bookkeeping.
+
+    Each row is its own SAVEPOINT: this used to share the inbox
+    transaction, and one unique-key clash (an echo that arrived before
+    the flusher committed its provider id) rolled back a whole batch of
+    customer messages — every second, forever.
     """
     rows = (
         await db.execute(
@@ -451,21 +520,83 @@ async def reconcile_outbox(db: AsyncSession) -> int:
             .join(WaOutbox, WaOutbox.outbound_message_id == Message.outbound_message_id)
             .where(
                 Message.state == MsgState.GENERATED,
-                Message.delivery_status.is_(None),
+                # A delivery status ("sent", "delivered") may arrive before
+                # this pass — the row still needs reconciling. Only the
+                # DRY_RUN marker means "already done".
+                or_(
+                    Message.delivery_status.is_(None),
+                    Message.delivery_status != _DRY_RUN_DELIVERY,
+                ),
                 WaOutbox.state.in_(("SENT", "SKIPPED_DRY_RUN", "FAILED_FINAL")),
             )
             .with_for_update(skip_locked=True, of=Message)
         )
     ).all()
+    handled = 0
     for message, outbox_row in rows:
-        if outbox_row.state == "SENT":
-            message.state = MsgState.SENT
-            message.sent_at = outbox_row.sent_at
-            message.provider_message_id = outbox_row.provider_message_id
-        elif outbox_row.state == "SKIPPED_DRY_RUN":
-            # Honest state: processed but deliberately not sent (DRY_RUN).
-            message.delivery_status = "skipped_dry_run"
-        else:  # FAILED_FINAL
-            message.state = MsgState.FAILED_FINAL
-            message.error_code = outbox_row.error_code
-    return len(rows)
+        try:
+            async with db.begin_nested():
+                await _reconcile_one(db, message, outbox_row)
+            handled += 1
+        except Exception:
+            logger.exception("outbox_reconcile_failed", outbox_id=outbox_row.id)
+    return handled
+
+
+async def _reconcile_one(db: AsyncSession, message: Message, outbox_row: WaOutbox) -> None:
+    if outbox_row.state == "SENT":
+        message.state = MsgState.SENT
+        message.sent_at = outbox_row.sent_at
+        provider_id = outbox_row.provider_message_id
+        if provider_id:
+            # The echo may have beaten the flusher's commit and landed as
+            # a `system` message with this very id; it is our reply, so
+            # it folds into the real row instead of clashing with it.
+            duplicate = (
+                await db.execute(
+                    select(Message).where(
+                        Message.chat_id == message.chat_id,
+                        Message.provider_message_id == provider_id,
+                        Message.id != message.id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if duplicate is not None and duplicate.source is MsgSource.SYSTEM:
+                await db.delete(duplicate)
+                await db.flush()
+            elif duplicate is not None:
+                logger.warning("outbox_reconcile_id_taken", outbox_id=outbox_row.id)
+                return
+            message.provider_message_id = provider_id
+        return
+    if outbox_row.state == "SKIPPED_DRY_RUN":
+        # Honest state: processed but deliberately not sent (DRY_RUN).
+        message.delivery_status = _DRY_RUN_DELIVERY
+        return
+    # FAILED_FINAL: the reply exists but the customer never got it. That
+    # used to be silent — the question stayed ANSWERED, no flag, no
+    # alert. The customer is now a manager's job and the owner is told.
+    message.state = MsgState.FAILED_FINAL
+    message.error_code = outbox_row.error_code
+    if outbox_row.purpose == "alert":
+        return
+    chat = await db.get(Chat, message.chat_id)
+    if chat is not None:
+        await set_attention(db, chat, AttentionReason.PROCESSING_ERROR, outbox_row.correlation_id)
+    if outbox_row.correlation_id:
+        await db.execute(
+            update(Message)
+            .where(
+                Message.correlation_id == outbox_row.correlation_id,
+                Message.direction == MsgDirection.IN,
+                Message.state == MsgState.ANSWERED,
+            )
+            .values(state=MsgState.HANDED_TO_HUMAN, error_code="send_failed")
+        )
+    await record_alert(
+        db,
+        kind="system",
+        event_key="send_failed",
+        period_key=hour_bucket(),
+        detail={"error_code": outbox_row.error_code},
+    )

@@ -21,7 +21,13 @@ import SystemPage from "./pages/SystemPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { retry: 1, refetchOnWindowFocus: false, staleTime: 15_000 },
+    queries: {
+      // A 4xx (401 expired session, 404) will not get better on retry.
+      retry: (count, error) =>
+        count < 1 && !(error instanceof ApiError && error.status < 500),
+      refetchOnWindowFocus: false,
+      staleTime: 15_000,
+    },
   },
 });
 

@@ -53,7 +53,12 @@ from app.services.generation import (
     generate_reply,
 )
 from app.services.kb_text import detect_language, normalize_query
-from app.services.media_processing import PROCESSABLE, has_open_media_job
+from app.services.media_processing import (
+    PROCESSABLE,
+    has_open_media_job,
+    open_media_message_ids,
+    said_about_a_file_recently,
+)
 from app.whatsapp.outbox import enqueue_text
 
 if TYPE_CHECKING:
@@ -240,6 +245,12 @@ class AiPipeline:
                 await self._hand_over_charged(result.claim)
                 return 1
             outcome = await generate_reply(self._deps, result.claim.generation_input)
+            if outcome.error_code == "already_charged":
+                # The barrier inside generate_reply refused a second paid
+                # call for this question: same handling as the pre-claim
+                # check, a human answers.
+                await self._hand_over_charged(result.claim)
+                return 1
             await self._persist(result.claim, outcome)
             return 1
         finally:
@@ -263,19 +274,23 @@ class AiPipeline:
             correlation_for(claim.chat_id, message_id) for message_id in claim.message_ids
         ]
         async with self._deps.sessionmaker() as db:
-            paid = (
-                (
-                    await db.execute(
-                        select(AiCall.correlation_id).where(
-                            AiCall.correlation_id.in_(candidates),
-                            AiCall.call_type == CallType.CHAT,
-                            AiCall.status == "ok",
-                        )
+            rows = (
+                await db.execute(
+                    select(AiCall.correlation_id, AiCall.status).where(
+                        AiCall.correlation_id.in_(candidates),
+                        AiCall.call_type == CallType.CHAT,
+                        AiCall.status.in_(("ok", "started")),
+                        AiCall.barrier_key.is_not(None) | (AiCall.status == "ok"),
                     )
                 )
-                .scalars()
-                .all()
-            )
+            ).all()
+            # A `started` row whose barrier is still set is a call that
+            # was made and never accounted for (the worker died with the
+            # answer in flight). Whether the provider billed it is
+            # unknown, so it counts as paid.
+            if any(status == "started" for _, status in rows):
+                return True
+            paid = [correlation for correlation, status in rows if status == "ok"]
             if not paid:
                 return False
             answered = (
@@ -394,6 +409,22 @@ class AiPipeline:
             # the customer their file arrived instead of leaving them in
             # silence, but only when the bot may speak in this chat at
             # all (same gate as step 3).
+            # A voice note or photo whose media job is still open is
+            # WAITING, not unreadable. The pickup query excludes such
+            # chats, but a job can be created between pickup and this
+            # claim; treating it as a file here would hand it to a human
+            # with a paid "file received" and never transcribe it.
+            waiting = await open_media_message_ids(
+                db,
+                [
+                    m.id
+                    for m in fresh
+                    if m.media_type in PROCESSABLE and not (m.transcript or "").strip()
+                ],
+            )
+            if waiting:
+                await db.commit()
+                return _ClaimResult()
             text_messages: list[Message] = []
             media_messages: list[Message] = []
             for message in fresh:
@@ -596,6 +627,10 @@ class AiPipeline:
                 await db.commit()
                 return
 
+            if outcome.text is None and outcome.cost_usd > 0:
+                # A billed call that produced nothing usable (an empty
+                # completion) is still the dialog's spend.
+                chat.total_cost_usd = chat.total_cost_usd + outcome.cost_usd
             if outcome.text is not None:
                 # Invariant 3: GENERATED (with text) BEFORE any send.
                 reply_id = await self._insert_reply(
@@ -774,6 +809,12 @@ class AiPipeline:
         Idempotent through the deterministic outbound id: a re-run
         cannot send it twice.
         """
+        if await said_about_a_file_recently(self._deps.sessionmaker, ack.chat_id):
+            # The customer heard about a file minutes ago and the dialog is
+            # already flagged. Composing the sentence again is a paid call
+            # per file: a PDF every few seconds must not buy one each.
+            logger.info("media_ack_suppressed", chat_id=ack.chat_id)
+            return
         reply = await compose_service_reply(
             self._deps,
             reason=ack.reason,

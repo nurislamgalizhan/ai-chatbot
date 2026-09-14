@@ -5,6 +5,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   attachTag,
   ChatDetail,
@@ -21,7 +22,8 @@ import {
   listMessages,
   listNotes,
   listTags,
-  openChat,
+  getChat,
+  markChatOpened,
   resolveChat,
   sendMessage,
 } from "../api/chats";
@@ -171,9 +173,22 @@ const MEDIA_LABELS: Record<string, string> = {
 
 /* Files are served by the API, never linked from a filesystem path: the
  * endpoint resolves chat+message ids itself and sends the bytes as an
- * attachment. After retention deletes the file the transcript stays, so
- * the block says so instead of offering a dead link. */
+ * attachment. Only voice notes and photos are ever downloaded by the
+ * bot; documents, video and stickers stay on the manager's phone, and a
+ * location or contact card is already described in the message text —
+ * none of those may be labelled «удалён по сроку хранения». */
+function mediaNote(message: ChatMessage): string | null {
+  const processable = message.media_type === "voice" || message.media_type === "image";
+  if (processable) {
+    return message.transcript
+      ? "файл удалён по сроку хранения"
+      : "файл ботом не сохранён — есть только на телефоне";
+  }
+  return "бот такие файлы не скачивает — файл на телефоне менеджера";
+}
+
 function MediaBlock({ chatId, message }: { chatId: number; message: ChatMessage }) {
+  if (message.media_type === "other") return null; // the body describes it
   const label = MEDIA_LABELS[message.media_type ?? "other"] ?? "файл";
   const href = `/api/chats/${chatId}/messages/${message.id}/media`;
   return (
@@ -187,7 +202,7 @@ function MediaBlock({ chatId, message }: { chatId: number; message: ChatMessage 
           </a>
         </>
       ) : (
-        <span className="muted"> — файл удалён по сроку хранения</span>
+        <span className="muted"> — {mediaNote(message)}</span>
       )}
     </div>
   );
@@ -235,7 +250,7 @@ function MessageBlock({
           </button>
         )}
       </div>
-      {message.media_type && (
+      {message.media_type && message.error_code !== "reaction" && (
         <MediaBlock chatId={chatId} message={message} />
       )}
       {message.body && <div>{message.body}</div>}
@@ -335,11 +350,22 @@ function ModeControl({
   );
 }
 
+const FILTER_KEYS = new Set<string>(["all", "attention", "unread", "unresolved"]);
+
 export default function ChatsPage() {
   const queryClient = useQueryClient();
-  const [filter, setFilter] = useState<ChatFilter>("all");
+  // Deep links from «Обзор» (/chats?filter=attention) and «Расходы»
+  // (/chats?chat=ID) land here; the page state starts from the URL.
+  const [params] = useSearchParams();
+  const initialFilter = params.get("filter");
+  const initialChat = Number(params.get("chat"));
+  const [filter, setFilter] = useState<ChatFilter>(
+    initialFilter && FILTER_KEYS.has(initialFilter) ? (initialFilter as ChatFilter) : "all",
+  );
   const [search, setSearch] = useState("");
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(
+    Number.isInteger(initialChat) && initialChat > 0 ? initialChat : null,
+  );
   const [draft, setDraft] = useState("");
   const [showNotes, setShowNotes] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
@@ -360,9 +386,18 @@ export default function ChatsPage() {
 
   const chatDetail = useQuery({
     queryKey: ["chat", selectedId],
-    queryFn: () => openChat(selectedId!),
+    queryFn: () => getChat(selectedId!),
     enabled: selectedId !== null,
   });
+  // Opening a dialog marks it read and clears «требует внимания» — an
+  // explicit POST, so that a plain link to the GET cannot do it.
+  useEffect(() => {
+    if (selectedId === null) return;
+    void markChatOpened(selectedId).then(() => {
+      void queryClient.invalidateQueries({ queryKey: ["chat", selectedId] });
+      void queryClient.invalidateQueries({ queryKey: ["chats"] });
+    }).catch(() => undefined);
+  }, [selectedId, queryClient]);
 
   const messagesQuery = useInfiniteQuery({
     queryKey: ["messages", selectedId],

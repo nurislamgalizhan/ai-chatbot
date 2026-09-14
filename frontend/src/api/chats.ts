@@ -77,7 +77,12 @@ export function listChats(filter: ChatFilter, q: string, cursor?: string) {
   return api<ChatListResponse>("GET", `/api/chats${qs ? `?${qs}` : ""}`);
 }
 
-export const openChat = (id: number) => api<ChatDetail>("GET", `/api/chats/${id}`);
+export const getChat = (id: number) => api<ChatDetail>("GET", `/api/chats/${id}`);
+
+/** Marks the dialog read and clears «требует внимания» (owner decision):
+ *  a POST, so a cross-site link to the GET cannot do it. */
+export const markChatOpened = (id: number) =>
+  api<ChatDetail>("POST", `/api/chats/${id}/open`);
 
 export const listMessages = (id: number, beforeId?: number) =>
   api<MessageListResponse>(

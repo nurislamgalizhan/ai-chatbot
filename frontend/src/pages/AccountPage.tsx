@@ -76,6 +76,8 @@ export default function AccountPage() {
               </tr>
             </tbody>
           </table>
+        ) : account.isError ? (
+          <span className="error">Не удалось загрузить данные учётной записи</span>
         ) : (
           <span className="muted">Загрузка…</span>
         )}
@@ -175,6 +177,8 @@ export default function AccountPage() {
               </div>
             )}
           </>
+        ) : sessions.isError ? (
+          <span className="error">Не удалось загрузить список сессий</span>
         ) : (
           <span className="muted">Загрузка…</span>
         )}

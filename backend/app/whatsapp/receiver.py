@@ -7,23 +7,25 @@ UNIQUE constraint — logged as a duplicate, deleted again, never reprocessed.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 
 from app.models import InboundNotification, SystemEvent, WhatsappInstance
 from app.services.alerts import hour_bucket, record_alert
 from app.whatsapp.classify import IGNORED_KINDS, classify
+from app.whatsapp.provider import RawNotification
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from app.config import Settings
-    from app.whatsapp.provider import RawNotification, WhatsAppProvider
+    from app.whatsapp.provider import WhatsAppProvider
 
 logger = structlog.get_logger(__name__)
 
@@ -119,6 +121,33 @@ async def store_notification(
     return True
 
 
+#: SQLSTATE classes that describe the DATA, not the server: 22 = data
+#: exception (a NUL inside JSONB is 22P05), 23 = integrity violation.
+#: Everything else (08 connection, 40 rollback, 53/57/58 server trouble)
+#: is treated as an outage and redelivered.
+_POISON_SQLSTATE_CLASSES = ("22", "23")
+
+
+def _rejected_by_database(exc: SQLAlchemyError) -> bool:
+    """Is this a deterministic rejection of the payload rather than an
+    outage? asyncpg errors are wrapped twice; the SQLSTATE is on the
+    innermost exception."""
+    if getattr(exc, "connection_invalidated", False):
+        return False
+    orig = getattr(exc, "orig", None)
+    for candidate in (orig, getattr(orig, "__cause__", None)):
+        state = getattr(candidate, "sqlstate", None) or getattr(candidate, "pgcode", None)
+        if isinstance(state, str) and state[:2] in _POISON_SQLSTATE_CLASSES:
+            return True
+    return isinstance(exc, DataError | IntegrityError)
+
+
+def _sanitized(notification: RawNotification) -> RawNotification:
+    """The same payload without the characters PostgreSQL's JSONB refuses."""
+    cleaned = json.loads(json.dumps(notification.body).replace("\\u0000", ""))
+    return RawNotification(receipt_id=notification.receipt_id, body=cleaned)
+
+
 class PollingReceiver:
     """One long-poll cycle per call; the worker loops it forever."""
 
@@ -154,9 +183,18 @@ class PollingReceiver:
             async with self._sessionmaker() as db:
                 await store_notification(db, self._instance_pk, notification)
                 await db.commit()  # commit FIRST...
-        except (SQLAlchemyError, OSError):
-            # Infrastructure failure: nothing persisted, do NOT ack —
-            # redelivery is the correct outcome. The loop backs off.
+        except SQLAlchemyError as exc:
+            if not _rejected_by_database(exc):
+                # Infrastructure failure: nothing persisted, do NOT ack —
+                # redelivery is the correct outcome. The loop backs off.
+                raise
+            # The DATABASE rejected the payload itself (a NUL byte inside
+            # JSONB, a value out of range): redelivering it would fail the
+            # same way forever and block every message behind it. Preserve
+            # what can be preserved and ack.
+            logger.exception("inbound_rejected_by_database", receipt_id=notification.receipt_id)
+            await self._record_parse_failure(_sanitized(notification))
+        except OSError:
             raise
         except Exception:
             # Parse/classification failure: preserve the payload, mark the

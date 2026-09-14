@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from app.ai.tokens import estimate_tokens
 from app.models.enums import KbLanguage
 from app.services.kb_text import chunk_text, detect_language, normalize_query, token_key
@@ -29,6 +30,12 @@ from app.services.kb_text import chunk_text, detect_language, normalize_query, t
         # A genuinely short kk question stays kk: the ratio is high even
         # with a single Kazakh-specific letter.
         ("қанша тұрады", KbLanguage.KK),
+        ("Сәлем", KbLanguage.KK),
+        ("Қанша?", KbLanguage.KK),
+        # One Kazakh letter in a short Russian sentence is a name, not a
+        # language: 1 of 19 letters is 5.3 %, above the ratio alone.
+        ("Айгерім придёт завтра", KbLanguage.RU),
+        ("Пусть Ұлан позвонит", KbLanguage.RU),
     ],
 )
 def test_detect_language(text: str, expected: KbLanguage) -> None:

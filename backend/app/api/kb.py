@@ -148,7 +148,7 @@ def _document_item(document: KbDocument, chunk_count: int) -> DocumentListItem:
 @router.get("/documents", response_model=DocumentListResponse)
 async def list_documents(
     db: Annotated[AsyncSession, Depends(get_db)],
-    status_filter: Annotated[str | None, Query(alias="status", max_length=20)] = None,
+    status_filter: Annotated[DocStatus | None, Query(alias="status")] = None,
     category: Annotated[str | None, Query(max_length=60)] = None,
 ) -> DocumentListResponse:
     stmt = select(KbDocument).where(KbDocument.deleted_at.is_(None))
@@ -495,6 +495,7 @@ async def create_faq(
     ):
         for pattern in patterns:
             db.add(build_pattern(faq.id, language, pattern))
+    await bump_kb_version(db)
     try:
         await db.flush()
     except IntegrityError as exc:
@@ -597,6 +598,7 @@ async def update_faq(
                 setattr(faq, status_field, AnswerStatus.MACHINE)
     if "category" in changes:
         faq.category = changes["category"]
+    await bump_kb_version(db)
     await db.flush()
     await record_audit(
         db,
@@ -624,6 +626,7 @@ async def delete_faq(
     faq = await _get_faq(db, faq_id)
     await db.execute(delete(KbFaqPattern).where(KbFaqPattern.faq_id == faq_id))
     await db.delete(faq)
+    await bump_kb_version(db)
     await record_audit(
         db,
         action="kb.faq_deleted",
@@ -697,6 +700,15 @@ async def translate_faq_answer(
             detail="Сначала нужен русский ответ — он источник перевода",
         )
     target = KbLanguage(body.language)
+    answer_field, status_field = _ANSWER_FIELDS[body.language]
+    if getattr(faq, status_field) is AnswerStatus.APPROVED:
+        # An approved translation is the owner's reviewed text: a click
+        # must not silently demote it to a machine draft (customers in
+        # that language would fall back to the paid model until re-approval).
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Перевод уже утверждён — сначала снимите утверждение, если хотите заменить его",
+        )
     source_ru = faq.answer_ru
     # The request's transaction must not stay open across a network call
     # to OpenAI: on a small VPS that ties up a pool connection for
@@ -710,9 +722,9 @@ async def translate_faq_answer(
         raise _ai_http_error(exc) from exc
 
     faq = await _get_faq(db, faq_id)
-    answer_field, status_field = _ANSWER_FIELDS[body.language]
     setattr(faq, answer_field, result.text)
     setattr(faq, status_field, AnswerStatus.MACHINE)
+    await bump_kb_version(db)
     await db.flush()
     await record_audit(
         db,
@@ -798,6 +810,8 @@ async def suggest_faq_patterns(
             continue
         db.add(candidate)
         added += 1
+    if added:
+        await bump_kb_version(db)
     await db.flush()
     await record_audit(
         db,
@@ -822,6 +836,7 @@ async def add_faq_pattern(
 ) -> FaqItem:
     faq = await _get_faq(db, faq_id)
     db.add(build_pattern(faq.id, KbLanguage(body.language), body.pattern))
+    await bump_kb_version(db)
     try:
         await db.flush()
     except IntegrityError as exc:
@@ -841,6 +856,7 @@ async def delete_faq_pattern(
     if pattern is None or pattern.faq_id != faq_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Формулировка не найдена")
     await db.delete(pattern)
+    await bump_kb_version(db)
     await db.flush()
     return (await _faq_items(db, [faq]))[0]
 

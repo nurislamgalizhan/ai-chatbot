@@ -20,11 +20,15 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from sqlalchemy import text as sa_text
+from sqlalchemy import update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.ai import guardrails
-from app.ai.chat_provider import ChatError, ChatRequest, ChatUsage
+from app.ai.chat_provider import ChatError, ChatRequest, ChatUsage, billing_ambiguous
 from app.ai.context_builder import ContextInput, HistoryTurn, build_context
 from app.ai.embeddings import EmbeddingError
+from app.ai.tokens import count_tokens
 from app.models import AiCall, SystemEvent
 from app.models.enums import CallType, KbLanguage
 from app.services import app_settings, budget, semantic_cache
@@ -99,6 +103,10 @@ SERVICE_SITUATIONS: dict[str, str] = {
         "Клиент прислал слишком длинное голосовое сообщение. Попроси отправить "
         "короче или написать вопрос текстом."
     ),
+    "audio_unclear": (
+        "Клиент прислал голосовое сообщение, в котором не удалось распознать речь. "
+        "Скажи, что сообщение передано менеджеру, и предложи написать вопрос текстом."
+    ),
     "media_sensitive": (
         "Клиент прислал документ с личными данными. Скажи, что такие документы "
         "не обрабатываются автоматически и обращение передано менеджеру. "
@@ -119,6 +127,8 @@ _SAFETY_NET: dict[str, str] = {
     "en": "I've passed your message to a manager — they will contact you shortly.",
 }
 _SERVICE_MAX_TOKENS = 120
+#: Tokenizer slack for the chat template around the service prompt.
+_SERVICE_ESTIMATE_MARGIN_TOKENS = 50
 _SERVICE_SYSTEM = (
     "Ты — ассистент организации, отвечающий клиентам в WhatsApp. Напиши ОДНО "
     "короткое вежливое сообщение клиенту (1-2 предложения) для описанной ситуации. "
@@ -228,7 +238,18 @@ async def compose_service_reply(
         return ServiceReply(text=safety_net_text(language), generated=False)
 
     sub_correlation = f"{correlation_id}:service:a{attempt}"
-    estimate = estimate_max_cost_usd(prices, 400, _SERVICE_MAX_TOKENS)
+    system = _SERVICE_SYSTEM
+    if style:
+        system = f"{system}\nСтиль общения: {style.strip()}"
+    user_content = f"Ситуация: {situation}\nЯзык ответа: {language.value}"
+    # Reserve for the prompt that is actually sent: the owner's style text
+    # can be thousands of characters, and a fixed guess let the gate admit
+    # a call several times larger than what it had reserved for.
+    estimate = estimate_max_cost_usd(
+        prices,
+        count_tokens(system) + count_tokens(user_content) + _SERVICE_ESTIMATE_MARGIN_TOKENS,
+        _SERVICE_MAX_TOKENS,
+    )
     reserved = await budget.reserve(
         deps.sessionmaker,
         sub_correlation=sub_correlation,
@@ -241,19 +262,11 @@ async def compose_service_reply(
         # for — we cannot pay to say "we cannot answer".
         return ServiceReply(text=safety_net_text(language), generated=False)
 
-    system = _SERVICE_SYSTEM
-    if style:
-        system = f"{system}\nСтиль общения: {style.strip()}"
     try:
         result = await deps.chat_provider.complete(
             ChatRequest(
                 system=system,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"Ситуация: {situation}\nЯзык ответа: {language.value}",
-                    }
-                ],
+                messages=[{"role": "user", "content": user_content}],
                 model=model,
                 max_output_tokens=_SERVICE_MAX_TOKENS,
                 reasoning_effort="none",
@@ -408,6 +421,86 @@ async def _record_ai_call(
         call_id = call.id
         await db.commit()
     return call_id
+
+
+async def _begin_chat_call(
+    deps: GenerationDeps,
+    *,
+    inp: GenerationInput,
+    model: str,
+    instruction_version: int | None,
+    reasoning_effort: str | None,
+    kb_chunk_ids: list[int],
+) -> int | None:
+    """Claim the right to make THE paid chat call for this question.
+
+    A `started` row keyed on `{correlation}:main` is written BEFORE the
+    model is called (the media path has done this since phase 7). None
+    means the partial UNIQUE index refused: an earlier attempt already
+    made — or may have made — this call, so paying again is off the
+    table and the dialog goes to a human instead.
+    """
+    stmt = (
+        pg_insert(AiCall)
+        .values(
+            correlation_id=inp.correlation_id,
+            chat_id=inp.chat_id,
+            call_type=CallType.CHAT,
+            model=model,
+            status="started",
+            barrier_key=f"{inp.correlation_id}:main",
+            rag_chunk_ids=kb_chunk_ids,
+            instruction_version=instruction_version,
+            reasoning_effort=reasoning_effort,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["barrier_key"], index_where=sa_text("barrier_key IS NOT NULL")
+        )
+        .returning(AiCall.id)
+    )
+    async with deps.sessionmaker() as db:
+        inserted = (await db.execute(stmt)).scalar_one_or_none()
+        await db.commit()
+    return int(inserted) if inserted is not None else None
+
+
+async def _finish_chat_call(
+    deps: GenerationDeps,
+    call_id: int,
+    *,
+    model: str,
+    usage: ChatUsage | None,
+    cost_usd: Decimal,
+    cost_kzt: Decimal,
+    latency_ms: int | None = None,
+    status: str = "ok",
+    error_code: str | None = None,
+    clear_barrier: bool = False,
+) -> None:
+    """Fill in the started row with what actually happened.
+
+    `clear_barrier` is for a definite provider rejection (nothing was
+    billed): the barrier lifts so the promised retry can make the call.
+    A billed call and an ambiguous failure keep it.
+    """
+    used = usage or ChatUsage()
+    values: dict[str, Any] = {
+        "model": model,
+        "input_tokens": used.input_tokens,
+        "cached_input_tokens": used.cached_input_tokens,
+        "output_tokens": used.output_tokens,
+        "reasoning_tokens": used.reasoning_tokens,
+        "cost_usd": cost_usd,
+        "cost_kzt": cost_kzt,
+        "latency_ms": latency_ms,
+        "status": status,
+        "error_code": error_code,
+    }
+    if clear_barrier:
+        values["barrier_key"] = None
+    async with deps.sessionmaker() as db:
+        await db.execute(update(AiCall).where(AiCall.id == call_id).values(**values))
+        await db.commit()
 
 
 async def _system_event(
@@ -626,6 +719,26 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
             max_output_tokens=output_cap,
             reasoning_effort=reasoning_effort,
         )
+        call_id = await _begin_chat_call(
+            deps,
+            inp=inp,
+            model=model,
+            instruction_version=instruction.version,
+            reasoning_effort=reasoning_effort,
+            kb_chunk_ids=built.kb_chunk_ids,
+        )
+        if call_id is None:
+            # An earlier attempt made (or may have made) this very call and
+            # lost the answer: paying twice for one question is the thing
+            # the money rules forbid, so a human answers instead.
+            await budget.release(deps.sessionmaker, sub_correlation=sub_correlation)
+            return GenerationOutcome(
+                kind="error",
+                error_code="already_charged",
+                retryable=False,
+                handoff=True,
+                instruction_version=instruction.version,
+            )
         try:
             result = await deps.chat_provider.complete(request)
         except ChatError as exc:
@@ -654,19 +767,20 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
                     sub_correlation=sub_correlation,
                     actual_usd=failure_cost,
                 )
-            await _record_ai_call(
+            # The barrier lifts only when the provider definitely rejected
+            # the request. A billed empty completion or a timeout keeps it:
+            # the retry then goes to a human instead of paying twice.
+            barrier_cleared = billed is None and not billing_ambiguous(exc)
+            await _finish_chat_call(
                 deps,
-                inp=inp,
-                call_type=CallType.CHAT,
+                call_id,
                 model=model,
                 usage=billed,
                 cost_usd=failure_cost,
                 cost_kzt=usd_to_kzt(failure_cost, rate),
-                kb_chunk_ids=built.kb_chunk_ids,
-                instruction_version=instruction.version,
-                reasoning_effort=reasoning_effort,
                 status="error",
                 error_code=str(exc)[:200],
+                clear_barrier=barrier_cleared,
             )
             if await breaker.record_failure():
                 await _system_event(
@@ -679,7 +793,10 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
             return GenerationOutcome(
                 kind="error",
                 error_code=str(exc)[:200],
-                retryable=exc.retryable,
+                retryable=exc.retryable and barrier_cleared,
+                handoff=not barrier_cleared,
+                cost_usd=failure_cost,
+                cost_kzt=usd_to_kzt(failure_cost, rate),
                 instruction_version=instruction.version,
             )
 
@@ -694,19 +811,16 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
             ),
         )
         cost_kzt = usd_to_kzt(cost_usd, rate)
-        ai_call_id = await _record_ai_call(
+        await _finish_chat_call(
             deps,
-            inp=inp,
-            call_type=CallType.CHAT,
+            call_id,
             model=result.model,
             usage=result.usage,
             cost_usd=cost_usd,
             cost_kzt=cost_kzt,
             latency_ms=result.latency_ms,
-            kb_chunk_ids=built.kb_chunk_ids,
-            instruction_version=instruction.version,
-            reasoning_effort=reasoning_effort,
         )
+        ai_call_id = call_id
         await budget.settle(deps.sessionmaker, sub_correlation=sub_correlation, actual_usd=cost_usd)
 
         # --- output validation --------------------------------------------
@@ -735,6 +849,10 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
             and inp.merged_count == 1
             and not inp.memory
             and bool(search.hits)
+            # Owner work (sandbox, chat_id None) must not seed what
+            # customers are served: it can run against an instruction
+            # version that was never activated.
+            and inp.chat_id is not None
         )
         if cacheable:
             async with deps.sessionmaker() as db:
@@ -747,8 +865,9 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
             kind="model",
             text=text,
             handoff=handoff,
-            cost_usd=cost_usd,
-            cost_kzt=cost_kzt,
+            # The dialog paid for the query embedding too.
+            cost_usd=cost_usd + embed_cost,
+            cost_kzt=cost_kzt + usd_to_kzt(embed_cost, rate),
             usage=result.usage,
             latency_ms=result.latency_ms,
             kb_chunk_ids=built.kb_chunk_ids,

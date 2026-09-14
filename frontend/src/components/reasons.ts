@@ -49,7 +49,107 @@ const REASONS: Record<string, MessageReason> = {
   },
   already_charged: {
     tone: "warn",
-    text: "Файл уже был оплачен ранее — диалог передан менеджеру",
+    text: "Этот вопрос уже был оплачен ранее, ответ потерялся — диалог передан менеджеру",
+  },
+  // --- inbox: the customer changed their mind ---
+  superseded_by_edit: {
+    tone: "info",
+    text: "Клиент исправил сообщение — бот ответил на новую версию",
+  },
+  deleted_by_customer: { tone: "info", text: "Клиент удалил это сообщение" },
+  unsupported_content: {
+    tone: "info",
+    text: "Геолокация, контакт или опрос — бот такое не разбирает, передано менеджеру",
+  },
+  send_failed: {
+    tone: "danger",
+    text: "Ответ не удалось отправить — диалог передан менеджеру",
+  },
+  // --- media: outcomes of a voice note or a photo ---
+  media_disabled: {
+    tone: "info",
+    text: "Распознавание таких файлов выключено в «Лимитах» — передано менеджеру",
+  },
+  media_not_configured: {
+    tone: "warn",
+    text: "Распознавание файлов не настроено (нет ключа OpenAI) — передано менеджеру",
+  },
+  audio_too_long: {
+    tone: "info",
+    text: "Голосовое длиннее лимита — бот попросил написать текстом",
+  },
+  audio_unclear: {
+    tone: "info",
+    text: "В голосовом не удалось распознать речь — передано менеджеру",
+  },
+  empty_transcript: {
+    tone: "info",
+    text: "В голосовом не удалось распознать речь — передано менеджеру",
+  },
+  audio_unreadable: {
+    tone: "warn",
+    text: "Аудиофайл не удалось прочитать — передано менеджеру",
+  },
+  image_unreadable: {
+    tone: "warn",
+    text: "Изображение не удалось прочитать — передано менеджеру",
+  },
+  image_limit_reached: {
+    tone: "info",
+    text: "Исчерпан лимит фото на диалог — передано менеджеру",
+  },
+  media_too_large: {
+    tone: "info",
+    text: "Файл больше разрешённого размера — передано менеджеру",
+  },
+  media_no_url: {
+    tone: "warn",
+    text: "Провайдер не передал ссылку на файл — передано менеджеру",
+  },
+  media_disk_low: {
+    tone: "danger",
+    text: "На диске мало места — файл не скачан, передано менеджеру",
+  },
+  no_price: {
+    tone: "warn",
+    text: "Нет цены модели в «Лимитах» — файл передан менеджеру",
+  },
+  no_audio_price: {
+    tone: "warn",
+    text: "Нет цены распознавания речи в «Лимитах» — файл передан менеджеру",
+  },
+  media_download_failed: {
+    tone: "danger",
+    text: "Не удалось скачать файл у провайдера — передано менеджеру",
+  },
+  media_write_failed: {
+    tone: "danger",
+    text: "Не удалось сохранить файл на диск — передано менеджеру",
+  },
+  transcription_failed: {
+    tone: "danger",
+    text: "Сбой распознавания речи — передано менеджеру",
+  },
+  vision_failed: {
+    tone: "danger",
+    text: "Сбой распознавания изображения — передано менеджеру",
+  },
+  media_unexpected_error: {
+    tone: "danger",
+    text: "Сбой обработки файла — передано менеджеру",
+  },
+  // --- pipeline configuration ---
+  openai_not_configured: {
+    tone: "warn",
+    text: "Не настроен ключ OpenAI — бот не отвечает, сообщение ждёт",
+  },
+  no_active_instruction: {
+    tone: "warn",
+    text: "Нет активной инструкции агента — бот не отвечает",
+  },
+  circuit_breaker_open: {
+    tone: "warn",
+    text: "Модель временно недоступна после серии сбоев — сообщение подождёт",
   },
 };
 
@@ -66,13 +166,27 @@ export function messageReason(
   state: string,
 ): MessageReason | null {
   if (!code) return null;
-  if (code.startsWith("blocked_by_limit:")) {
+  // A reaction (👍 on the bot's answer) is not an outcome worth a plaque.
+  if (code === "reaction") return null;
+  if (code === "blocked_by_limit" || code.startsWith("blocked_by_limit:")) {
     const scope = LIMIT_SCOPES[code.slice("blocked_by_limit:".length)];
     return {
       tone: "warn",
       text: scope
         ? `Исчерпан ${scope} — бот не отвечает, диалог у менеджера`
         : "Исчерпан лимит расходов — диалог у менеджера",
+    };
+  }
+  if (code.startsWith("sensitive:")) {
+    return {
+      tone: "info",
+      text: "Похоже на документ с личными данными — бот его не анализирует, передано менеджеру",
+    };
+  }
+  if (code.startsWith("pricing:")) {
+    return {
+      tone: "warn",
+      text: "Нет цены модели или курса в «Лимитах» — бот не тратит, сообщение ждёт",
     };
   }
   const known = REASONS[code];

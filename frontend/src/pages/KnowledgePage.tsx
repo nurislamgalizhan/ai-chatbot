@@ -24,6 +24,7 @@ import {
   updateFaqAnswer,
 } from "../api/kb";
 import { ApiError } from "../api/client";
+import { plural } from "../components/charts";
 import Icon from "../components/icons";
 
 /* The section has exactly two things in it, and the owner should be able
@@ -602,6 +603,18 @@ function DocDrawer({ id, onClose }: { id: number; onClose: () => void }) {
     },
   });
 
+  if (doc.isError) {
+    return (
+      <div className="drawer">
+        <header className="drawer-head">
+          <button type="button" className="icon-btn" onClick={onClose} title="Закрыть">
+            ‹
+          </button>
+        </header>
+        <div className="error">Документ не найден или не загрузился</div>
+      </div>
+    );
+  }
   if (!doc.data) return <div className="drawer">Загрузка…</div>;
   const dirty = title !== doc.data.title || body !== doc.data.body;
   const state = DOC_STATE[doc.data.index_state] ?? DOC_STATE.not_indexed;
@@ -884,14 +897,22 @@ export default function KnowledgePage() {
         <div className="tabs">
           <button className={tab === "qa" ? "tab active" : "tab"} onClick={() => go({ tab: "qa" })}>
             Вопрос — ответ <span className="tab-count">{faq.data?.items.length ?? 0}</span>
-            {notReady > 0 && <span className="chip">{notReady} выключены</span>}
+            {notReady > 0 && (
+              <span className="chip">
+                {notReady} {plural(notReady, "выключена", "выключены", "выключены")}
+              </span>
+            )}
           </button>
           <button
             className={tab === "docs" ? "tab active" : "tab"}
             onClick={() => go({ tab: "docs" })}
           >
             Справка для бота <span className="tab-count">{docs.data?.items.length ?? 0}</span>
-            {preparing > 0 && <span className="chip warn">{preparing} готовятся</span>}
+            {preparing > 0 && (
+              <span className="chip warn">
+                {preparing} {plural(preparing, "готовится", "готовятся", "готовятся")}
+              </span>
+            )}
           </button>
         </div>
 

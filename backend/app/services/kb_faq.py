@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import case, select
 
 from app.models import KbFaq, KbFaqMiss, KbFaqPattern
 from app.models.enums import AnswerStatus, KbLanguage
@@ -64,7 +64,7 @@ async def match_faq(
         return None
     tokens = token_key(text)
 
-    faq = await _find_by_pattern(db, normalized, tokens)
+    faq = await _find_by_pattern(db, normalized, tokens, language)
     if faq is None:
         return None  # not an FAQ question at all — not a language miss
 
@@ -84,15 +84,21 @@ async def match_faq(
     return FaqHit(faq_id=faq.id, answer=answer, language=language)
 
 
-async def _find_by_pattern(db: AsyncSession, normalized: str, tokens: list[str]) -> KbFaq | None:
+async def _find_by_pattern(
+    db: AsyncSession, normalized: str, tokens: list[str], language: KbLanguage
+) -> KbFaq | None:
     """Exact normalized match first, then an order-insensitive word-set
     match. Both are deterministic — no fuzzy scoring that could answer a
-    different question than the one asked."""
+    different question than the one asked. Patterns are unique per
+    LANGUAGE, so the same word may belong to two entries in two
+    languages: the customer's language wins, then the older entry."""
+    preference = case((KbFaqPattern.language == language, 0), else_=1)
     exact = (
         await db.execute(
             select(KbFaq)
             .join(KbFaqPattern, KbFaqPattern.faq_id == KbFaq.id)
             .where(KbFaq.is_active.is_(True), KbFaqPattern.normalized_pattern == normalized)
+            .order_by(preference, KbFaq.id)
             .limit(1)
         )
     ).scalar_one_or_none()
@@ -105,6 +111,7 @@ async def _find_by_pattern(db: AsyncSession, normalized: str, tokens: list[str])
             select(KbFaq)
             .join(KbFaqPattern, KbFaqPattern.faq_id == KbFaq.id)
             .where(KbFaq.is_active.is_(True), KbFaqPattern.token_key == tokens)
+            .order_by(preference, KbFaq.id)
             .limit(1)
         )
     ).scalar_one_or_none()

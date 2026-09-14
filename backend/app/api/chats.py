@@ -58,6 +58,9 @@ router = APIRouter(prefix="/api/chats", tags=["chats"], dependencies=[Depends(re
 
 _PAGE_SIZE = 20
 _MESSAGES_PAGE_SIZE = 50
+#: A forged cursor with an id above int8 fails inside asyncpg with a 500;
+#: bounding it here turns that into the 422 every other bad cursor gets.
+_MAX_BIGINT = 2**63
 # Served with a FIXED type from our own extension, never from the
 # provider's mimeType: an "image" that is really SVG/HTML must not be
 # rendered in the admin's origin. Anything unknown downloads as bytes.
@@ -85,7 +88,10 @@ def _decode_cursor(cursor: str) -> tuple[datetime, int]:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode()).decode()
         ts_str, id_str = raw.split("|", 1)
-        return datetime.fromisoformat(ts_str), int(id_str)
+        row_id = int(id_str)
+        if not 0 < row_id < _MAX_BIGINT:
+            raise ValueError("cursor id out of range")
+        return datetime.fromisoformat(ts_str), row_id
     except (ValueError, binascii.Error) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Неверный курсор"
@@ -146,7 +152,7 @@ async def list_chats(  # noqa: PLR0912 - filter assembly
     is_resolved: bool | None = None,
     unread_only: bool = False,
     tag_id: int | None = None,
-    mode: str | None = None,
+    mode: ChatMode | None = None,
 ) -> ChatListResponse:
     last_message = (
         select(func.left(func.coalesce(Message.body, Message.transcript, ""), 120))
@@ -219,14 +225,27 @@ async def list_chats(  # noqa: PLR0912 - filter assembly
 
 
 @router.get("/{chat_id}", response_model=ChatDetailResponse)
+async def get_chat(
+    chat_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ChatDetailResponse:
+    """Read-only. Marking the dialog as opened is a separate POST: a GET
+    is exempt from the CSRF/Origin checks, and a cross-site top-level
+    link to this URL would otherwise clear «требует внимания» on a chat
+    a customer is still waiting in."""
+    chat = await _get_chat(db, chat_id)
+    return await _detail_response(db, chat)
+
+
+@router.post("/{chat_id}/open", response_model=ChatDetailResponse)
 async def open_chat(
     chat_id: int,
     request: Request,
     user: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ChatDetailResponse:
-    """Opening a dialog marks it read and clears "needs attention"
-    (owner decision) — the clearing is audited."""
+    """Opening a dialog in the panel marks it read and clears "needs
+    attention" (owner decision) — the clearing is audited."""
     chat = await _get_chat(db, chat_id)
     chat.unread_count = 0
     await clear_attention(

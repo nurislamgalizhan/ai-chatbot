@@ -13,6 +13,7 @@ from sqlalchemy import func, select, update
 
 from app.models import AgentInstruction
 from app.security.audit import record_audit
+from app.services.semantic_cache import bump_kb_version
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -78,6 +79,9 @@ async def activate_version(
         update(AgentInstruction).where(AgentInstruction.is_active.is_(True)).values(is_active=False)
     )
     instruction.is_active = True
+    # A cached answer was written under the previous instruction; the
+    # cache key carries kb_version, so bumping it is the invalidation.
+    await bump_kb_version(db)
     await db.flush()
     await record_audit(
         db,

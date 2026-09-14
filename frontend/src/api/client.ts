@@ -18,6 +18,19 @@ function csrfToken(): string {
 
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+/** FastAPI validation errors arrive as [{loc, msg}] — name the field. */
+function validationText(items: unknown[]): string | null {
+  const parts = items
+    .map((item) => {
+      if (typeof item !== "object" || item === null) return null;
+      const { loc, msg } = item as { loc?: unknown[]; msg?: unknown };
+      const field = Array.isArray(loc) && loc.length ? String(loc[loc.length - 1]) : "";
+      return field && typeof msg === "string" ? `${field}: ${msg}` : typeof msg === "string" ? msg : null;
+    })
+    .filter((x): x is string => Boolean(x));
+  return parts.length ? `Проверьте поля — ${parts.join("; ")}` : null;
+}
+
 export async function api<T>(
   method: string,
   path: string,
@@ -35,10 +48,18 @@ export async function api<T>(
   });
 
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith("/api/auth/")) {
+      // The session expired or was revoked while a page was open. Every
+      // poll would keep failing and the page would show empty states
+      // («Чатов нет») instead of the login form. A full navigation also
+      // drops everything cached from the old session.
+      window.location.assign("/login");
+    }
     let detail = `Ошибка ${response.status}`;
     try {
       const data = (await response.json()) as { detail?: unknown };
       if (typeof data.detail === "string") detail = data.detail;
+      else if (Array.isArray(data.detail)) detail = validationText(data.detail) ?? detail;
     } catch {
       /* non-JSON error body */
     }

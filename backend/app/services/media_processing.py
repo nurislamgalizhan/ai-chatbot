@@ -41,13 +41,13 @@ from sqlalchemy import Exists, exists, func, or_, select
 from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from app.ai.chat_provider import ChatError, ChatUsage, VisionRequest
+from app.ai.chat_provider import ChatError, ChatUsage, VisionRequest, billing_ambiguous
 from app.ai.transcription import TranscriptionRequest
 from app.media import storage
 from app.media.audio import AudioError, probe_duration_seconds
 from app.media.images import ImageError, PreparedImage, prepare_image
 from app.media.sensitive import image_is_sensitive
-from app.models import AiCall, Chat, MediaJob, Message, SystemEvent
+from app.models import AiCall, Chat, ChatMemory, MediaJob, Message, SystemEvent
 from app.models.enums import (
     AnswerSource,
     AttentionReason,
@@ -78,6 +78,8 @@ from app.services.pricing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -139,6 +141,9 @@ class _Job:
     attempts: int
     download_url: str | None
     mime_type: str | None
+    #: Set when an earlier attempt already stored the file: the retry
+    #: reads it back instead of downloading and storing a second copy.
+    media_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +187,21 @@ async def enqueue_media_job(
         )
         .on_conflict_do_nothing(constraint="uq_media_jobs_message")
     )
+
+
+async def open_media_message_ids(db: AsyncSession, message_ids: list[int]) -> set[int]:
+    """Which of these messages still have an unfinished media job."""
+    if not message_ids:
+        return set()
+    rows = (
+        await db.execute(
+            select(MediaJob.message_id).where(
+                MediaJob.message_id.in_(message_ids),
+                MediaJob.state.in_((MediaJobState.PENDING, MediaJobState.PROCESSING)),
+            )
+        )
+    ).scalars()
+    return {int(row) for row in rows}
 
 
 def has_open_media_job(chat_id: Any) -> Exists:
@@ -290,6 +310,7 @@ class MediaProcessor:
                         attempts=job_row.attempts,
                         download_url=job_row.download_url,
                         mime_type=job_row.mime_type,
+                        media_ref=message.media_ref,
                     )
                 )
             await db.commit()
@@ -306,6 +327,13 @@ class MediaProcessor:
         max_bytes = (
             limits.max_audio_mb if job.media_type is MediaType.VOICE else limits.max_image_mb
         ) * _MB
+        data = await self._stored_bytes(job)
+        if data is not None:
+            if job.media_type is MediaType.VOICE:
+                await self._handle_voice(job, data, limits)
+            else:
+                await self._handle_image(job, data, limits)
+            return
         if job.download_url is None or self._deps.provider is None:
             await self._refuse(job, "media_no_url", template="media")
             return
@@ -324,6 +352,37 @@ class MediaProcessor:
             await self._handle_voice(job, data, limits)
         else:
             await self._handle_image(job, data, limits)
+
+    async def _stored_bytes(self, job: _Job) -> bytes | None:
+        """The file as an earlier attempt stored it, if it is still there.
+
+        A retry after a provider error used to download the file again
+        and store a second copy, overwriting `media_ref` and orphaning the
+        first file until the retention sweep.
+        """
+        if not job.media_ref:
+            return None
+        try:
+            return await asyncio.to_thread(
+                storage.read_bytes, self._deps.settings.media_dir, job.media_ref
+            )
+        except (storage.MediaStorageError, OSError):
+            return None
+
+    async def _job_language(self, job: _Job) -> KbLanguage | None:
+        """The customer's language as far as it can be known BEFORE any
+        paid call: the caption when there is one, else what the chat
+        remembered from earlier messages. None = unknown — the
+        transcriber then detects it itself instead of being told "ru",
+        which is how Kazakh voice notes came back as Russian text.
+        """
+        if job.caption and job.caption.strip():
+            return detect_language(job.caption)
+        async with self._deps.sessionmaker() as db:
+            memory = await db.get(ChatMemory, job.chat_id)
+        if memory is not None and memory.language in ("ru", "kk", "en"):
+            return KbLanguage(memory.language)
+        return None
 
     async def _load_limits(self) -> _Limits:
         async with self._deps.sessionmaker() as db:
@@ -478,7 +537,7 @@ class MediaProcessor:
             await self._refuse(job, "already_charged", template="media")
             return
 
-        language = detect_language(job.caption or "")
+        language = await self._job_language(job)
         try:
             result = await provider.transcribe(
                 TranscriptionRequest(
@@ -486,15 +545,27 @@ class MediaProcessor:
                     file_name=f"voice-{job.message_id}{storage.extension_for(job.mime_type)}",
                     model=model,
                     terms=limits.terms,
-                    language=language.value,
+                    language=language.value if language is not None else None,
                 )
             )
         except ChatError as exc:
-            await budget.release(self._deps.sessionmaker, sub_correlation=reserved)
-            await self._abandon_call(call_id, "transcription_failed")
-            await self._fail(job, "transcription_failed", retryable=exc.retryable)
+            await self._paid_call_failed(
+                job,
+                exc=exc,
+                call_id=call_id,
+                sub_correlation=reserved,
+                error_code="transcription_failed",
+                cost_of_usage=None,
+            )
             return
 
+        # Billed by whatever is longer: our header-based measurement or
+        # the provider's own reading. A container whose header claims a
+        # short duration must not be booked shorter than what was paid.
+        billed_seconds = seconds
+        if result.duration_seconds and math.ceil(result.duration_seconds) > seconds:
+            billed_seconds = math.ceil(result.duration_seconds)
+            cost = compute_audio_cost_usd(price, billed_seconds)
         await self._finish_paid(
             job,
             call_id=call_id,
@@ -502,7 +573,7 @@ class MediaProcessor:
             model=result.model,
             cost_usd=cost,
             latency_ms=result.latency_ms,
-            audio_seconds=seconds,
+            audio_seconds=billed_seconds,
             sub_correlation=reserved,
             duration_seconds=duration,
         )
@@ -557,7 +628,7 @@ class MediaProcessor:
             await self._refuse(job, "already_charged", template="media")
             return
 
-        language = detect_language(job.caption or "")
+        language = (await self._job_language(job)) or KbLanguage.RU
         try:
             result = await provider.describe_image(
                 VisionRequest(
@@ -572,9 +643,14 @@ class MediaProcessor:
                 )
             )
         except ChatError as exc:
-            await budget.release(self._deps.sessionmaker, sub_correlation=reserved)
-            await self._abandon_call(call_id, "vision_failed")
-            await self._fail(job, "vision_failed", retryable=exc.retryable)
+            await self._paid_call_failed(
+                job,
+                exc=exc,
+                call_id=call_id,
+                sub_correlation=reserved,
+                error_code="vision_failed",
+                cost_of_usage=lambda usage: compute_cost_usd(prices, _usage_for_pricing(usage)),
+            )
             return
 
         cost = compute_cost_usd(prices, _usage_for_pricing(result.usage))
@@ -636,14 +712,78 @@ class MediaProcessor:
             await db.commit()
         return int(inserted) if inserted is not None else None
 
-    async def _abandon_call(self, call_id: int, error_code: str) -> None:
-        """A started call that failed: keep the row (so the barrier still
-        counts the attempt) but mark it honestly."""
+    async def _paid_call_failed(
+        self,
+        job: _Job,
+        *,
+        exc: ChatError,
+        call_id: int,
+        sub_correlation: str,
+        error_code: str,
+        cost_of_usage: Callable[[ChatUsage], Decimal] | None,
+    ) -> None:
+        """A paid call raised. Three cases, three different truths:
+
+        * the request REACHED the model and was billed (an empty
+          completion carries its usage): book the real spend, settle the
+          reservation, keep the barrier row — paying again for the same
+          file is the one thing that must not happen — and hand the file
+          to a human;
+        * a definite provider error (HTTP status): nothing was billed —
+          release the money and DROP the started row, otherwise the retry
+          the backoff promises would hit the barrier and end in a false
+          «already paid»;
+        * an ambiguous failure (timeout, dropped connection): the request
+          may have been billed, so the barrier row stays and the retry
+          goes to a human rather than paying twice.
+        """
+        if exc.usage is not None and cost_of_usage is not None:
+            cost = cost_of_usage(exc.usage)
+            await self._book_failed_call(job, call_id, exc.usage, cost, error_code)
+            await budget.settle(
+                self._deps.sessionmaker, sub_correlation=sub_correlation, actual_usd=cost
+            )
+            await self._fail(job, error_code, retryable=False)
+            return
+        await budget.release(self._deps.sessionmaker, sub_correlation=sub_correlation)
+        await self._abandon_call(call_id, error_code, keep_barrier=billing_ambiguous(exc))
+        await self._fail(job, error_code, retryable=exc.retryable)
+
+    async def _book_failed_call(
+        self, job: _Job, call_id: int, usage: ChatUsage, cost_usd: Decimal, error_code: str
+    ) -> None:
         async with self._deps.sessionmaker() as db:
+            try:
+                rate: Decimal | None = await load_usd_kzt_rate(db)
+            except PricingError:
+                rate = None
             call = await db.get(AiCall, call_id)
+            chat = await db.get(Chat, job.chat_id, with_for_update=True)
             if call is not None:
                 call.status = "error"
                 call.error_code = error_code
+                call.input_tokens = usage.input_tokens
+                call.cached_input_tokens = usage.cached_input_tokens
+                call.output_tokens = usage.output_tokens
+                call.reasoning_tokens = usage.reasoning_tokens
+                call.cost_usd = cost_usd
+                call.cost_kzt = usd_to_kzt(cost_usd, rate) if rate is not None else Decimal(0)
+            if chat is not None:
+                chat.total_cost_usd = chat.total_cost_usd + cost_usd
+            await db.commit()
+
+    async def _abandon_call(self, call_id: int, error_code: str, *, keep_barrier: bool) -> None:
+        """A started call that was NOT billed. With `keep_barrier` the row
+        stays (marked honestly) and blocks a second attempt; without it
+        the row is removed so the retry can claim a fresh call."""
+        async with self._deps.sessionmaker() as db:
+            call = await db.get(AiCall, call_id)
+            if call is not None:
+                if keep_barrier:
+                    call.status = "error"
+                    call.error_code = error_code
+                else:
+                    await db.delete(call)
             await db.commit()
 
     async def _finish_paid(
@@ -688,9 +828,16 @@ class MediaProcessor:
                 call.cost_kzt = usd_to_kzt(cost_usd, rate) if rate is not None else Decimal(0)
                 call.latency_ms = latency_ms
             if job_row is not None:
-                job_row.state = MediaJobState.DONE if clean else MediaJobState.FAILED
-                job_row.lease_until = None
-                job_row.error_code = None if clean else "empty_result"
+                if clean:
+                    job_row.state = MediaJobState.DONE
+                    job_row.lease_until = None
+                    job_row.error_code = None
+                else:
+                    # Stays open until the customer has been told, so the
+                    # AI pipeline cannot answer this chat out of order.
+                    job_row.state = MediaJobState.PROCESSING
+                    job_row.lease_until = datetime.now(UTC) + _LEASE
+                    job_row.error_code = "empty_result"
                 if duration_seconds is not None:
                     job_row.duration_seconds = Decimal(str(round(duration_seconds, 2)))
             if message is not None:
@@ -710,6 +857,13 @@ class MediaProcessor:
         await budget.settle(
             self._deps.sessionmaker, sub_correlation=sub_correlation, actual_usd=cost_usd
         )
+        if not clean:
+            # We paid and got nothing usable. A human is flagged, but the
+            # customer must not be left in silence about their voice note.
+            await self._send_service_reply(job, "audio_unclear")
+            async with self._deps.sessionmaker() as db:
+                await self._close_job(db, job, MediaJobState.FAILED, "empty_result")
+                await db.commit()
         logger.info(
             "media_processed",
             message_id=job.message_id,
@@ -720,7 +874,10 @@ class MediaProcessor:
     # ---------------------------- outcomes ------------------------------
 
     async def _store(self, job: _Job, data: bytes, mime_type: str | None) -> str | None:
-        """Write the file and record it, before any paid call."""
+        """Write the file and record it, before any paid call. An earlier
+        attempt's file is reused, never duplicated."""
+        if job.media_ref:
+            return job.media_ref
         try:
             media_ref = await asyncio.to_thread(
                 storage.save_bytes, self._deps.settings.media_dir, job.chat_id, data, mime_type
@@ -834,29 +991,7 @@ class MediaProcessor:
         )
 
     async def _said_recently(self, chat_id: int) -> bool:
-        """Has this chat already heard a service reply inside the cooldown?"""
-        async with self._deps.sessionmaker() as db:
-            minutes = int(await get_setting(db, app_settings.MEDIA_REPLY_COOLDOWN_MINUTES))
-            if minutes <= 0:
-                return False
-            recent = (
-                await db.execute(
-                    select(Message.id)
-                    .where(
-                        Message.chat_id == chat_id,
-                        Message.direction == MsgDirection.OUT,
-                        Message.answer_source == AnswerSource.SERVICE,
-                        # Only acknowledgements ABOUT FILES count: a
-                        # topic refusal three minutes ago must not
-                        # swallow the one sentence telling the customer
-                        # their voice note went to a manager.
-                        Message.correlation_id.like("%:media:%"),
-                        Message.created_at >= datetime.now(UTC) - timedelta(minutes=minutes),
-                    )
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            return recent is not None
+        return await said_about_a_file_recently(self._deps.sessionmaker, chat_id)
 
     async def _send_service_reply(self, job: _Job, reason: str) -> None:
         """Tell the customer what happened with their file.
@@ -877,7 +1012,7 @@ class MediaProcessor:
         if chat is None:
             return
 
-        language = detect_language(job.caption or "")
+        language = (await self._job_language(job)) or KbLanguage.RU
         correlation_id = f"{job.correlation_id}:reply"
         outbound_id = reply_outbound_id(correlation_id)
         async with self._deps.sessionmaker() as db:
@@ -931,6 +1066,39 @@ class MediaProcessor:
                 db, chat.instance_id, chat.wa_chat_id, reply.text, outbound_id, correlation_id
             )
             await db.commit()
+
+
+async def said_about_a_file_recently(
+    sessionmaker: async_sessionmaker[AsyncSession], chat_id: int
+) -> bool:
+    """Has this chat already heard a service reply about a file inside
+    the cooldown? Shared by the media processor (voice/photo refusals)
+    and the AI pipeline (documents, video, locations): composing that
+    sentence is a paid call, and a customer — or a spammer — sending a
+    PDF every few seconds must not buy one per file.
+    """
+    async with sessionmaker() as db:
+        minutes = int(await get_setting(db, app_settings.MEDIA_REPLY_COOLDOWN_MINUTES))
+        if minutes <= 0:
+            return False
+        recent = (
+            await db.execute(
+                select(Message.id)
+                .where(
+                    Message.chat_id == chat_id,
+                    Message.direction == MsgDirection.OUT,
+                    Message.answer_source == AnswerSource.SERVICE,
+                    # Only acknowledgements ABOUT FILES count: a topic
+                    # refusal three minutes ago must not swallow the one
+                    # sentence telling the customer their voice note went
+                    # to a manager.
+                    Message.correlation_id.like("%:media:%"),
+                    Message.created_at >= datetime.now(UTC) - timedelta(minutes=minutes),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return recent is not None
 
 
 def sanitize_description(text: str) -> str:

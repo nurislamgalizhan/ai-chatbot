@@ -16,6 +16,8 @@ _KAZAKH_LETTERS = set("әғқңөұүіһӘҒҚҢӨҰҮІҺ")
 # call the text kk: a lone Kazakh letter (a name like «Айгерім» inside a
 # Russian sentence) must not flip the whole message to kk.
 _KK_RATIO_THRESHOLD = 0.05
+_KK_MIN_LETTERS = 2
+_KK_SHORT_MESSAGE_LETTERS = 10
 _CYRILLIC_RE = re.compile(r"[а-яёА-ЯЁ]")
 _LATIN_RE = re.compile(r"[a-zA-Z]")
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
@@ -109,7 +111,14 @@ def detect_language(text: str) -> KbLanguage:
     # _CYRILLIC_RE covers the core а-я range only, so Kazakh-specific
     # letters are added on top to get the full Cyrillic count.
     total_cyrillic = len(_CYRILLIC_RE.findall(text)) + kazakh
-    if kazakh and total_cyrillic and kazakh / total_cyrillic >= _KK_RATIO_THRESHOLD:
+    # The ratio alone let ONE letter flip a short Russian sentence
+    # («Айгерім придёт завтра» — 1 of 19 is 5.3 %). A single Kazakh
+    # letter counts only in a very short message («Сәлем», «Қанша?»),
+    # where it is the message rather than a name inside one.
+    enough_letters = kazakh >= _KK_MIN_LETTERS or (
+        kazakh == 1 and total_cyrillic <= _KK_SHORT_MESSAGE_LETTERS
+    )
+    if enough_letters and total_cyrillic and kazakh / total_cyrillic >= _KK_RATIO_THRESHOLD:
         return KbLanguage.KK
     if total_cyrillic == 0 and _LATIN_RE.search(text):
         return KbLanguage.EN

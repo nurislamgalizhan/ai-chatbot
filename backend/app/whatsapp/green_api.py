@@ -7,6 +7,7 @@ and httpx logging stays disabled.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -265,7 +266,9 @@ class GreenApiProvider(WhatsAppProvider):
         about the URL is ever logged or put into the error.
         """
         try:
-            check_download_url(url, self._download_hosts)
+            # getaddrinfo is blocking: a slow resolver must not stall the
+            # polling loop, the outbox and the heartbeat with it.
+            await asyncio.to_thread(check_download_url, url, self._download_hosts)
         except DownloadNotAllowedError as exc:
             raise ProviderError(str(exc), status_code=None, retryable=False) from exc
         chunks: list[bytes] = []

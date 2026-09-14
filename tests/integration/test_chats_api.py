@@ -108,7 +108,10 @@ async def test_open_chat_clears_attention_and_unread_with_audit(
     client, _ = authed
     chat_id = await _make_chat(db_engine, instance_pk, "3000001", needs_attention=True)
 
-    response = await client.get(f"/api/chats/{chat_id}")
+    # A plain GET is read-only: a cross-site link must not clear the flag.
+    assert (await client.get(f"/api/chats/{chat_id}")).json()["needs_attention"] is True
+    _, headers = authed
+    response = await client.post(f"/api/chats/{chat_id}/open", headers=headers)
     assert response.status_code == 200
     assert response.json()["needs_attention"] is False
 

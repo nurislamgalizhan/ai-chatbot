@@ -46,6 +46,17 @@ class ChatError(Exception):
         self.usage = usage
 
 
+def billing_ambiguous(exc: ChatError) -> bool:
+    """Could this failed request have reached the model and been billed?
+
+    A timeout or a dropped connection: yes — the answer may have been
+    generated and lost on the wire. An HTTP status from the provider: no,
+    the request was rejected before any generation.
+    """
+    text = str(exc).lower()
+    return "timeout" in text or "connection" in text
+
+
 @dataclass(frozen=True)
 class ChatRequest:
     """system + alternating history; content only, no tools ever."""

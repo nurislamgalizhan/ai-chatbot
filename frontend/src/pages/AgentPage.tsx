@@ -10,6 +10,7 @@ import {
 } from "../api/agent";
 import { ApiError } from "../api/client";
 import Icon from "../components/icons";
+import { messageReason } from "../components/reasons";
 
 const EFFORTS = ["none", "low", "medium", "high"];
 
@@ -88,9 +89,14 @@ function SandboxPanel() {
             <div className="chip">инструкция v{result.instruction_version}</div>
           )}
           {result.text && <div className="sandbox-answer">{result.text}</div>}
-          {result.error_code && (
-            <div className="plaque danger">Ошибка: {result.error_code}</div>
-          )}
+          {result.error_code &&
+            (() => {
+              const reason = messageReason(
+                result.error_code,
+                result.kind === "guardrail" || result.kind === "model" ? "ANSWERED" : "FAILED_FINAL",
+              );
+              return reason ? <div className={`plaque ${reason.tone}`}>{reason.text}</div> : null;
+            })()}
           {result.usage && (
             <dl className="kv">
               <dt>Токены</dt>
