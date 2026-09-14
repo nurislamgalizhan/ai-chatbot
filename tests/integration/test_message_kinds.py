@@ -156,6 +156,60 @@ async def test_an_edited_question_is_answered(maker) -> None:
     assert rows[0].media_type is None
 
 
+async def test_an_edit_replaces_the_question_it_corrects(maker) -> None:
+    """The edit arrives with its OWN id (verified against the provider's
+    documented payload), so the original stays in the queue. Answering
+    both would hand the model the question twice — once in the wording
+    the customer had already fixed."""
+    await deliver(maker, text_notification("Сколько стоит зал в пятницу?", id_message="orig-1"))
+    await deliver(
+        maker,
+        notification(
+            "editedMessage",
+            {
+                "editedMessageData": {
+                    "textMessage": "Сколько стоит зал в субботу?",
+                    "stanzaId": "orig-1",
+                }
+            },
+            id_message="edit-1",
+        ),
+    )
+
+    rows = await messages(maker)
+    assert len(rows) == 2, "both the original and the edit exist in the history"
+    original = next(r for r in rows if r.provider_message_id == "orig-1")
+    edited = next(r for r in rows if r.provider_message_id == "edit-1")
+    assert original.state is MsgState.IGNORED
+    assert original.error_code == "superseded_by_edit"
+    assert edited.state is MsgState.QUEUED, "only the corrected wording is answered"
+    assert edited.body == "Сколько стоит зал в субботу?"
+
+
+async def test_an_edit_after_the_answer_is_a_new_question(maker) -> None:
+    """If we already answered, the correction is simply the next thing
+    the customer said — and the answered row is not rewritten."""
+    await deliver(maker, text_notification("Сколько стоит зал?", id_message="orig-2"))
+    async with maker() as db, db.begin():
+        message = (await db.execute(select(Message))).scalar_one()
+        message.state = MsgState.ANSWERED
+
+    await deliver(
+        maker,
+        notification(
+            "editedMessage",
+            {"editedMessageData": {"textMessage": "А в субботу?", "stanzaId": "orig-2"}},
+            id_message="edit-2",
+        ),
+    )
+
+    rows = await messages(maker)
+    original = next(r for r in rows if r.provider_message_id == "orig-2")
+    assert original.state is MsgState.ANSWERED
+    assert original.error_code is None
+    assert next(r for r in rows if r.provider_message_id == "edit-2").state is MsgState.QUEUED
+
+
 async def test_a_deleted_question_is_not_answered(maker) -> None:
     """Answering a question the customer retracted is worse than silence."""
     await deliver(maker, text_notification("Ой, не то написал", id_message="m3"))

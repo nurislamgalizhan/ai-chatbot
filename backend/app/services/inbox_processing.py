@@ -216,6 +216,14 @@ async def _handle_incoming(
         error_code="reaction" if kind is Kind.INCOMING_REACTION else None,
         sent_at=_ts(parsed.timestamp),
     )
+    if kind is Kind.INCOMING_EDITED:
+        # The edit carries its OWN idMessage (checked against the
+        # provider's documented payload), so it becomes a new row while
+        # the ORIGINAL may still be waiting in the queue. Without this,
+        # the debounce merge hands the model both wordings of the same
+        # question — including the one the customer had just corrected.
+        await _supersede_original(db, body, reason="superseded_by_edit")
+
     # Voice and images need a paid pre-processing step before the AI can
     # answer them; the job carries the download URL, which is available
     # only here, while the raw payload is at hand (phase 7). Everything
@@ -240,16 +248,18 @@ def _dict_get(body: dict[str, Any], *path: str) -> str:
     return str(current) if isinstance(current, str) else ""
 
 
-async def _handle_deleted(db: AsyncSession, row: InboundNotification, body: dict[str, Any]) -> None:
-    """The customer deleted a message.
+async def _supersede_original(db: AsyncSession, body: dict[str, Any], *, reason: str) -> int:
+    """Drop the pre-edit (or deleted) version from the work queue.
 
-    If we had not answered it yet, we must not answer it now: replying to
-    a retracted question is worse than staying silent. The deletion
-    itself is not shown as a new message — it changes the old one.
+    Only messages nobody has answered yet are touched: rewriting an
+    ANSWERED row would corrupt the reports, and the money is spent
+    either way.
     """
-    stanza_id = _dict_get(body, "messageData", "deletedMessageData", "stanzaId")
+    stanza_id = _dict_get(body, "messageData", "editedMessageData", "stanzaId") or _dict_get(
+        body, "messageData", "deletedMessageData", "stanzaId"
+    )
     if not stanza_id:
-        return
+        return 0
     result = await db.execute(
         update(Message)
         .where(
@@ -257,9 +267,19 @@ async def _handle_deleted(db: AsyncSession, row: InboundNotification, body: dict
             Message.direction == MsgDirection.IN,
             Message.state.in_((MsgState.QUEUED, MsgState.RECEIVED)),
         )
-        .values(state=MsgState.IGNORED, error_code="deleted_by_customer", next_attempt_at=None)
+        .values(state=MsgState.IGNORED, error_code=reason, next_attempt_at=None)
     )
-    cancelled = int(getattr(result, "rowcount", 0) or 0)
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+async def _handle_deleted(db: AsyncSession, row: InboundNotification, body: dict[str, Any]) -> None:
+    """The customer deleted a message.
+
+    If we had not answered it yet, we must not answer it now: replying to
+    a retracted question is worse than staying silent. The deletion
+    itself is not shown as a new message — it changes the old one.
+    """
+    cancelled = await _supersede_original(db, body, reason="deleted_by_customer")
     logger.info("customer_deleted_message", inbound_id=row.id, cancelled=cancelled)
 
 
