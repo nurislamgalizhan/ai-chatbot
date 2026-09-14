@@ -40,7 +40,7 @@ from app.services.generation import GenerationDeps
 from app.services.inbox_processing import process_inbound_batch, reconcile_outbox
 from app.services.kb_indexing import process_pending_documents
 from app.services.media_processing import MediaDeps, MediaProcessor
-from app.services.monitoring import check_and_alert
+from app.services.monitoring import check_and_alert, check_provider
 from app.services.retention import run_retention
 from app.whatsapp.green_api import GreenApiProvider
 from app.whatsapp.outbox import OutboxFlusher
@@ -81,6 +81,9 @@ _RETENTION_INTERVAL_SECONDS = 6 * 3600.0
 # channel — but a failed send backs off on its own schedule.
 _ALERT_INTERVAL_SECONDS = 20.0
 _MONITORING_INTERVAL_SECONDS = 300.0
+# The provider's own health: four requests against the owner's plan
+# limits, so half-hourly rather than every pass.
+_PROVIDER_CHECK_INTERVAL_SECONDS = 1800.0
 
 
 async def _heartbeat_loop(redis: Redis, stop: asyncio.Event) -> None:
@@ -352,12 +355,26 @@ async def _alert_loop(sessionmaker: async_sessionmaker[AsyncSession], stop: asyn
 
 
 async def _monitoring_loop(
-    settings: Settings, sessionmaker: async_sessionmaker[AsyncSession], stop: asyncio.Event
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    provider: GreenApiProvider | None,
+    stop: asyncio.Event,
 ) -> None:
-    """Disk, queue depth and backup freshness -> events and alerts."""
+    """Disk, queue depth, backup freshness -> events and alerts.
+
+    The provider is asked about itself on a slower cadence: those are
+    four HTTP calls against the owner's plan limits, and the failures
+    they detect (a misconfigured instance, a stuck outgoing queue) do
+    not appear in seconds.
+    """
+    last_provider_check = 0.0
     while not stop.is_set():
         try:
             await check_and_alert(sessionmaker, media_dir=settings.media_dir)
+            now = asyncio.get_running_loop().time()
+            if now - last_provider_check >= _PROVIDER_CHECK_INTERVAL_SECONDS:
+                last_provider_check = now
+                await check_provider(sessionmaker, provider)
         except Exception:
             logger.exception("monitoring_error")
         await _wait(stop, _MONITORING_INTERVAL_SECONDS)
@@ -452,7 +469,7 @@ async def run() -> None:  # noqa: PLR0915 - one wiring block per loop; splitting
             group.create_task(_media_retention_loop(settings, sessionmaker, stop))
             group.create_task(_retention_loop(sessionmaker, stop))
             group.create_task(_alert_loop(sessionmaker, stop))
-            group.create_task(_monitoring_loop(settings, sessionmaker, stop))
+            group.create_task(_monitoring_loop(settings, sessionmaker, provider, stop))
     finally:
         if provider is not None:
             await provider.aclose()

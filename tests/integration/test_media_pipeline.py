@@ -94,7 +94,15 @@ class FakeDownloadProvider(WhatsAppProvider):
     async def delete_notification(self, receipt_id: int) -> None:  # pragma: no cover
         return None
 
-    async def send_text(self, chat_id: str, text: str):  # pragma: no cover
+    async def send_text(  # noqa: PLR0913 - mirrors the provider interface
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        quoted_message_id: str | None = None,
+        typing_time_ms: int | None = None,
+        link_preview: bool = True,
+    ):  # pragma: no cover
         raise NotImplementedError
 
     async def send_file(

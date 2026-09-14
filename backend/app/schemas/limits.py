@@ -52,6 +52,13 @@ class LimitsSettings(BaseModel):
     retention_faq_misses_days: int = Field(ge=7, le=1_095)
     retention_audit_log_days: int = Field(ge=30, le=3_650)
     retention_transport_days: int = Field(ge=1, le=365)
+    # --- provider features (GREEN-API) ---
+    #: 0 = off; otherwise WhatsApp's own 1..20 s window. Free (a field of
+    #: sendMessage), but it delays the answer by this much.
+    typing_time_ms: int = Field(ge=0, le=20_000)
+    link_preview_enabled: bool
+    quote_customer_message: bool
+    provider_queue_alert_depth: int = Field(ge=1, le=10_000)
 
 
 class PriceItem(BaseModel):
@@ -75,6 +82,10 @@ class LimitsResponse(BaseModel):
     usd_kzt_rate: Decimal | None
     ledgers: list[LedgerSnapshot]
     dry_run: bool
+    #: Set after saving an alert phone that has no WhatsApp: a warning,
+    #: not an error — the check itself can fail for its own reasons, and
+    #: refusing to save the owner's own number would be worse.
+    notice: str | None = None
     # Explicit reminder rendered in the UI: DRY_RUN отключает только
     # отправку сообщений — расходы на OpenAI идут по-настоящему.
 

@@ -46,7 +46,15 @@ class FakeProvider(WhatsAppProvider):
     async def delete_notification(self, receipt_id: int) -> None:  # pragma: no cover
         return None
 
-    async def send_text(self, chat_id: str, text: str) -> SendResult:
+    async def send_text(  # noqa: PLR0913 - mirrors the provider interface
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        quoted_message_id: str | None = None,
+        typing_time_ms: int | None = None,
+        link_preview: bool = True,
+    ) -> SendResult:
         if self.fail_times > 0:
             self.fail_times -= 1
             raise ProviderError("sendMessage", status_code=500, retryable=True)

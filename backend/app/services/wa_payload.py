@@ -24,6 +24,10 @@ _MEDIA_BY_TYPE: dict[str, MediaType] = {
     "stickerMessage": MediaType.STICKER,
 }
 _TEXT_TYPES = frozenset({"textMessage", "extendedTextMessage", "quotedMessage"})
+#: An edited message carries the NEW text in its own object. It arrives as
+#: an ordinary incoming notification, so without this the customer's
+#: corrected question had no text at all and was never answered.
+_EDITED_TYPE = "editedMessage"
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,38 @@ def _https_url(value: object) -> str | None:
     return url
 
 
+#: Content types we summarise in words for the manager.
+_DESCRIBED_TYPES = frozenset(
+    {"locationMessage", "contactMessage", "contactsArrayMessage", "pollMessage"}
+)
+
+
+def _describe_content(type_message: str, message_data: dict[str, Any]) -> str:
+    """A one-line Russian description of non-text content.
+
+    Written into the message body so the manager opening the chat sees
+    "клиент отправил геолокацию" and not an empty bubble. The customer's
+    own data is preserved (an address, a phone) — this text stays in OUR
+    database and is never sent to the model as an instruction.
+    """
+    if type_message == "locationMessage":
+        location = _dict(message_data.get("locationMessageData"))
+        parts = [
+            str(location.get("nameLocation") or "").strip(),
+            str(location.get("address") or "").strip(),
+        ]
+        where = ", ".join(part for part in parts if part)
+        coords = f"{location.get('latitude')}, {location.get('longitude')}"
+        return _clip(f"[геолокация] {where or coords}", _MAX_TEXT_LEN) or "[геолокация]"
+    if type_message in {"contactMessage", "contactsArrayMessage"}:
+        contact = _dict(message_data.get("contactMessageData"))
+        name = str(contact.get("displayName") or "").strip()
+        return _clip(f"[контакт] {name}".strip(), _MAX_TEXT_LEN) or "[контакт]"
+    poll = _dict(message_data.get("pollMessageData"))
+    name = str(poll.get("name") or "").strip()
+    return _clip(f"[опрос] {name}".strip(), _MAX_TEXT_LEN) or "[опрос]"
+
+
 def parse_message(body: dict[str, Any]) -> ParsedMessage:
     message_data = _dict(body.get("messageData"))
     type_message = str(message_data.get("typeMessage", ""))
@@ -82,6 +118,8 @@ def parse_message(body: dict[str, Any]) -> ParsedMessage:
             or _dict(message_data.get("extendedTextMessageData")).get("text"),
             _MAX_TEXT_LEN,
         )
+    elif type_message == _EDITED_TYPE:
+        text = _clip(_dict(message_data.get("editedMessageData")).get("textMessage"), _MAX_TEXT_LEN)
     elif type_message in _MEDIA_BY_TYPE:
         media = _MEDIA_BY_TYPE[type_message]
         file_data = _dict(message_data.get("fileMessageData"))
@@ -90,6 +128,11 @@ def parse_message(body: dict[str, Any]) -> ParsedMessage:
         download_url = _https_url(file_data.get("downloadUrl"))
         file_name = _clip(file_data.get("fileName"), _MAX_NAME_LEN)
         mime_type = _clip(file_data.get("mimeType"), _MAX_MIME_LEN)
+    elif type_message in _DESCRIBED_TYPES:
+        # Real content the bot cannot use, but a human can: the history
+        # must say WHAT arrived instead of calling everything "a file".
+        text = _describe_content(type_message, message_data)
+        media = MediaType.OTHER
     elif type_message:
         media = MediaType.OTHER
 

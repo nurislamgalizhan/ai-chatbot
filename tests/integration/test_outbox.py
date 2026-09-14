@@ -27,7 +27,15 @@ class ScriptedSender(WhatsAppProvider):
     async def delete_notification(self, receipt_id: int) -> None:
         pass
 
-    async def send_text(self, chat_id: str, text: str) -> SendResult:
+    async def send_text(  # noqa: PLR0913 - mirrors the provider interface
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        quoted_message_id: str | None = None,
+        typing_time_ms: int | None = None,
+        link_preview: bool = True,
+    ) -> SendResult:
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome

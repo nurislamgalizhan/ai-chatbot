@@ -165,7 +165,15 @@ async def test_send_without_id_message_is_sent_not_retried(
         await enqueue_text(db, instance_pk, "77013@c.us", "hello", message_id)
 
     class NoIdSender(ScriptedSender):
-        async def send_text(self, chat_id: str, text: str) -> SendResult:
+        async def send_text(  # noqa: PLR0913 - mirrors the provider interface
+            self,
+            chat_id: str,
+            text: str,
+            *,
+            quoted_message_id: str | None = None,
+            typing_time_ms: int | None = None,
+            link_preview: bool = True,
+        ) -> SendResult:
             self.sent.append((chat_id, text))
             return SendResult(provider_message_id=None)
 

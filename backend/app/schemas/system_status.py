@@ -20,6 +20,13 @@ class TransportStatus(BaseModel):
     last_polled_at: datetime | None
     last_error: str | None
     state: str | None
+    state_checked_at: datetime | None = None
+    settings_checked_at: datetime | None = None
+    #: Plain-Russian reasons the instance configuration breaks the bot.
+    #: Empty list = nothing known to be wrong.
+    settings_problems: list[str] = Field(default_factory=list)
+    #: The watched instance settings as last read (no secrets).
+    provider_settings: dict[str, Any] = Field(default_factory=dict)
 
 
 class QueueStatus(BaseModel):
@@ -100,6 +107,7 @@ class ConnectionCheckResponse(BaseModel):
     ok: bool
     state: str | None
     error: str | None
+    problems: list[str] = Field(default_factory=list)
 
 
 class AuditRow(BaseModel):

@@ -93,6 +93,21 @@ RETENTION_AUDIT_LOG_DAYS = "retention_audit_log_days"
 # Delivery attempts and finished media jobs behind the visible history.
 RETENTION_TRANSPORT_DAYS = "retention_transport_days"
 
+# --- provider features (GREEN-API) ---
+# "Печатает…" before the answer. Free: it is a field of sendMessage, not
+# a second request (SPEC §16 allowed the indicator on exactly that
+# condition). It DELAYS delivery by this much, so it is the owner's call.
+# 0 = off.
+TYPING_TIME_MS = "typing_time_ms"
+# Link previews in bot answers. Off by default: a link in a two-line
+# answer pulls up to 2 MB of preview and pushes the text out of view.
+LINK_PREVIEW_ENABLED = "link_preview_enabled"
+# Answer quoting the customer's own message. Helps in chats where a
+# manager writes from the phone at the same time as the bot.
+QUOTE_CUSTOMER_MESSAGE = "quote_customer_message"
+# Provider-side queue depth that means our polling is not keeping up.
+PROVIDER_QUEUE_ALERT_DEPTH = "provider_queue_alert_depth"
+
 # --- phase 9 keys: alerts and monitoring ---
 # WhatsApp number that receives alerts. Empty = nothing is ever sent
 # anywhere (the owner has not opted in yet); alerts still accumulate and
@@ -151,6 +166,10 @@ DEFAULTS: dict[str, Any] = {
     RETENTION_FAQ_MISSES_DAYS: 180,
     RETENTION_AUDIT_LOG_DAYS: 365,
     RETENTION_TRANSPORT_DAYS: 30,
+    TYPING_TIME_MS: 1500,
+    LINK_PREVIEW_ENABLED: False,
+    QUOTE_CUSTOMER_MESSAGE: True,
+    PROVIDER_QUEUE_ALERT_DEPTH: 20,
     ALERT_PHONE: "",
     ALERTS_ENABLED: True,
     DISK_ALERT_PERCENT: 85,

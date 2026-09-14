@@ -38,8 +38,8 @@ from app.security.secrets import mask_secret
 from app.services import app_settings, monitoring
 from app.services.alerts import alert_text, hour_bucket, record_alert
 from app.services.app_settings import get_setting
-from app.whatsapp.green_api import GreenApiProvider
-from app.whatsapp.provider import ProviderError
+from app.whatsapp.green_api import GreenApiProvider, settings_problems
+from app.whatsapp.provider import InstanceHealth, ProviderError
 
 logger = structlog.get_logger(__name__)
 
@@ -92,6 +92,12 @@ async def status(
             last_polled_at=instance.last_polled_at if instance else None,
             last_error=instance.last_error if instance else None,
             state=instance.state if instance else None,
+            state_checked_at=instance.state_checked_at if instance else None,
+            settings_checked_at=instance.settings_checked_at if instance else None,
+            settings_problems=settings_problems(
+                dict(instance.settings_json or {}) if instance else {}
+            ),
+            provider_settings=dict(instance.settings_json or {}) if instance else {},
         ),
         model=settings.openai_chat_model,
         openai_configured=bool(settings.openai_api_key),
@@ -197,14 +203,23 @@ async def check_connection(
     provider = GreenApiProvider(settings)
     try:
         state = await provider.get_instance_state()
+        # Authorization is only half the answer: the instance can be
+        # authorized while its settings send every notification to a
+        # webhook we do not run — and then the bot answers nobody.
+        health = await provider.get_health()
     except ProviderError as exc:
         logger.warning("instance_state_check_failed", status_code=exc.status_code)
         await _store_state(db, state=None, error=f"provider:{exc.status_code}")
         return ConnectionCheckResponse(ok=False, state=None, error="unreachable")
     finally:
         await provider.aclose()
-    await _store_state(db, state=state, error=None)
-    return ConnectionCheckResponse(ok=state == "authorized", state=state, error=None)
+    await _store_state(db, state=state, error=None, health=health)
+    return ConnectionCheckResponse(
+        ok=state == "authorized" and not health.settings_problems,
+        state=state,
+        error=None,
+        problems=health.settings_problems,
+    )
 
 
 async def _active_instance(db: AsyncSession) -> WhatsappInstance | None:
@@ -220,7 +235,13 @@ async def _active_instance(db: AsyncSession) -> WhatsappInstance | None:
     ).scalar_one_or_none()
 
 
-async def _store_state(db: AsyncSession, *, state: str | None, error: str | None) -> None:
+async def _store_state(
+    db: AsyncSession,
+    *,
+    state: str | None,
+    error: str | None,
+    health: InstanceHealth | None = None,
+) -> None:
     instance = await _active_instance(db)
     if instance is None:
         return
@@ -230,6 +251,11 @@ async def _store_state(db: AsyncSession, *, state: str | None, error: str | None
         instance.last_error = None
     if error is not None:
         instance.last_error = error
+    if health is not None and health.settings:
+        # Kept so «Система» can show the configuration without calling
+        # the provider on every page render.
+        instance.settings_json = dict(health.settings)
+        instance.settings_checked_at = datetime.now(UTC)
     db.add(
         SystemEvent(
             level="info" if error is None else "warning",

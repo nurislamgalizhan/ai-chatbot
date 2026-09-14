@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from app.whatsapp.download_guard import DownloadNotAllowedError, check_download_url
 from app.whatsapp.provider import (
+    InstanceHealth,
     ProviderError,
     RawNotification,
     SendResult,
@@ -35,6 +36,63 @@ logger = structlog.get_logger(__name__)
 
 _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 _HTTP_ERROR_MIN = 400
+#: WhatsApp accepts 1..20 seconds of "typing"; anything outside is an error.
+_TYPING_MIN_MS = 1000
+_TYPING_MAX_MS = 20000
+
+#: Instance settings that decide whether this bot works at all. Everything
+#: else the provider returns is none of our business (and some of it is
+#: sensitive, e.g. the webhook token).
+_WATCHED_SETTINGS = frozenset(
+    {
+        "webhookUrl",
+        "incomingWebhook",
+        "outgoingWebhook",
+        "outgoingAPIMessageWebhook",
+        "stateWebhook",
+        "markIncomingMessagesReaded",
+        "delaySendMessagesMilliseconds",
+        "keepOnlineStatus",
+    }
+)
+
+
+def settings_problems(settings: dict[str, Any]) -> list[str]:
+    """Owner-facing reasons this instance configuration breaks the bot.
+
+    This is the check that catches the worst failure mode in the whole
+    system: with a webhook URL configured, the provider delivers
+    notifications THERE and our polling queue stays empty forever. No
+    error, no exception — the bot is simply silent for every customer,
+    and «последний приём сообщений» keeps ticking because polling itself
+    succeeds (it just returns nothing).
+    """
+    if not settings:
+        return []
+    problems: list[str] = []
+    if str(settings.get("webhookUrl") or "").strip():
+        problems.append(
+            "На инстансе задан адрес вебхука. Уведомления уходят туда, а бот их "
+            "забирает опросом — он не получит ни одного сообщения. Поле webhookUrl "
+            "в панели GREEN-API должно быть пустым."
+        )
+    if str(settings.get("incomingWebhook", "yes")).lower() == "no":
+        problems.append(
+            "В настройках инстанса выключены уведомления о входящих сообщениях "
+            "(incomingWebhook = no) — бот не увидит вопросы клиентов."
+        )
+    if str(settings.get("outgoingWebhook", "yes")).lower() == "no":
+        problems.append(
+            "Выключены уведомления об исходящих сообщениях (outgoingWebhook = no). "
+            "Бот не узнает, что менеджер ответил клиенту с телефона, и продолжит "
+            "отвечать сам."
+        )
+    if str(settings.get("outgoingAPIMessageWebhook", "yes")).lower() == "no":
+        problems.append(
+            "Выключены уведомления о сообщениях, отправленных ботом "
+            "(outgoingAPIMessageWebhook = no) — пропадут отметки доставки."
+        )
+    return problems
 
 
 def _classify_status(method: str, status_code: int) -> ProviderError:
@@ -44,7 +102,11 @@ def _classify_status(method: str, status_code: int) -> ProviderError:
 
 
 class GreenApiProvider(WhatsAppProvider):
-    supports_typing = False  # GREEN-API exposes no typing indicator
+    # Typing is free here: sendMessage carries a typingTime field, so the
+    # indicator costs no extra request (SPEC §16 allowed it on exactly
+    # that condition). A separate sendTyping method also exists; we do
+    # not use it precisely because it WOULD be an extra request.
+    supports_typing = True
 
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
         if not settings.green_api_id_instance or not settings.green_api_token:
@@ -143,12 +205,35 @@ class GreenApiProvider(WhatsAppProvider):
             self._path(f"deleteNotification/{receipt_id}"),
         )
 
-    async def send_text(self, chat_id: str, text: str) -> SendResult:
+    async def send_text(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        quoted_message_id: str | None = None,
+        typing_time_ms: int | None = None,
+        link_preview: bool = True,
+    ) -> SendResult:
+        body: dict[str, Any] = {"chatId": chat_id, "message": text}
+        if quoted_message_id:
+            # Quoting the customer's own question: in a chat where a
+            # manager also writes from the phone, an unquoted answer can
+            # arrive under someone else's line and read as an answer to it.
+            body["quotedMessageId"] = quoted_message_id
+        if typing_time_ms:
+            # The typing indicator costs NO extra request — it is a field
+            # of sendMessage itself (1000..20000 ms). It does delay the
+            # delivery by that long, which is why it is a setting.
+            body["typingTime"] = max(_TYPING_MIN_MS, min(int(typing_time_ms), _TYPING_MAX_MS))
+        if not link_preview:
+            # Default on the provider side is true: a link in a short
+            # answer then pulls up to 2 MB of preview.
+            body["linkPreview"] = False
         payload = await self._request(
             "sendMessage",
             "POST",
             self._path("sendMessage"),
-            json={"chatId": chat_id, "message": text},
+            json=body,
         )
         return self._send_result("sendMessage", payload)
 
@@ -204,6 +289,91 @@ class GreenApiProvider(WhatsAppProvider):
         except httpx.HTTPError as exc:
             raise ProviderError("downloadFile", status_code=None, retryable=True) from exc
         return b"".join(chunks)
+
+    async def get_health(self) -> InstanceHealth:
+        """Socket state, both provider-side queues and the settings that
+        decide whether this bot can receive anything at all.
+
+        Four independent calls, made only when the owner opens «Система»
+        or on the slow monitoring pass — never on a customer's path.
+        """
+        socket = await self._socket_status()
+        settings = await self._instance_settings()
+        return InstanceHealth(
+            socket=socket,
+            incoming_queue=await self._incoming_queue(),
+            outgoing_queue=await self._outgoing_queue(),
+            settings=settings,
+            settings_problems=settings_problems(settings),
+        )
+
+    async def _socket_status(self) -> str | None:
+        try:
+            payload = await self._request(
+                "getStatusInstance", "GET", self._path("getStatusInstance")
+            )
+        except ProviderError:
+            return None
+        if isinstance(payload, dict):
+            value = payload.get("statusInstance")
+            return str(value) if value is not None else None
+        return None
+
+    async def _instance_settings(self) -> dict[str, Any]:
+        try:
+            payload = await self._request("getSettings", "GET", self._path("getSettings"))
+        except ProviderError:
+            return {}
+        return (
+            {k: v for k, v in payload.items() if k in _WATCHED_SETTINGS}
+            if isinstance(payload, dict)
+            else {}
+        )
+
+    async def _incoming_queue(self) -> int | None:
+        try:
+            payload = await self._request("getWebhooksCount", "GET", self._path("getWebhooksCount"))
+        except ProviderError:
+            return None
+        if isinstance(payload, dict):
+            count = payload.get("count")
+            return int(count) if isinstance(count, int | float) else None
+        return None
+
+    async def _outgoing_queue(self) -> int | None:
+        """Our sends the provider has NOT delivered yet.
+
+        This is the one number that reveals the worst silent failure: the
+        API accepted the message (we recorded it as sent), the instance is
+        not authorized, and it sits in the provider's queue for 24 hours
+        while the customer waits.
+        """
+        try:
+            payload = await self._request(
+                "showMessagesQueue", "GET", self._path("showMessagesQueue")
+            )
+        except ProviderError:
+            return None
+        return len(payload) if isinstance(payload, list) else None
+
+    async def check_number(self, phone: str) -> bool | None:
+        """Does this number have WhatsApp? Used before trusting a number
+        the owner typed by hand (their own alert number)."""
+        digits = phone.lstrip("+")
+        if not digits.isdigit():
+            return None
+        try:
+            payload = await self._request(
+                "checkWhatsapp",
+                "POST",
+                self._path("checkWhatsapp"),
+                json={"phoneNumber": int(digits)},
+            )
+        except ProviderError:
+            return None
+        if isinstance(payload, dict) and isinstance(payload.get("existsWhatsapp"), bool):
+            return bool(payload["existsWhatsapp"])
+        return None
 
     async def get_instance_state(self) -> str:
         payload = await self._request("getStateInstance", "GET", self._path("getStateInstance"))

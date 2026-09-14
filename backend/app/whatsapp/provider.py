@@ -7,7 +7,7 @@ touching chats, RAG or the admin panel (SPEC §15).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -42,10 +42,34 @@ class SendResult:
     provider_message_id: str | None
 
 
+@dataclass(frozen=True)
+class InstanceHealth:
+    """What the provider says about itself, beyond "authorized".
+
+    Every field is optional: a provider that cannot report something must
+    leave it None rather than let the status page invent a value.
+    """
+
+    #: Socket state ("online"/"offline" for GREEN-API): a number can be
+    #: authorized while the socket is closed, and then nothing flows.
+    socket: str | None = None
+    #: Notifications waiting on the PROVIDER's side. Growing = we are not
+    #: collecting them (or they are being delivered somewhere else).
+    incoming_queue: int | None = None
+    #: Our own sends the provider has not delivered yet.
+    outgoing_queue: int | None = None
+    #: Instance settings that decide whether this bot can work at all
+    #: (see `settings_problems`).
+    settings: dict[str, Any] = field(default_factory=dict)
+    #: Human-readable reasons the instance configuration breaks the bot.
+    settings_problems: list[str] = field(default_factory=list)
+
+
 class WhatsAppProvider(ABC):
     """Minimal transport interface (SPEC §15)."""
 
-    #: Whether set_typing() is available. GREEN-API does not expose typing.
+    #: Whether a typing indicator can be requested. For GREEN-API it is
+    #: free: `sendMessage` takes a `typingTime`, so no extra request.
     supports_typing: bool = False
 
     @abstractmethod
@@ -57,7 +81,21 @@ class WhatsAppProvider(ABC):
         """Acknowledge a notification. Called ONLY after our commit."""
 
     @abstractmethod
-    async def send_text(self, chat_id: str, text: str) -> SendResult: ...
+    async def send_text(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        quoted_message_id: str | None = None,
+        typing_time_ms: int | None = None,
+        link_preview: bool = True,
+    ) -> SendResult:
+        """Send a text message.
+
+        The keyword options are all optional capabilities: a provider that
+        lacks them ignores them rather than failing, because none of them
+        changes whether the customer gets an answer.
+        """
 
     @abstractmethod
     async def send_file(
@@ -80,6 +118,19 @@ class WhatsAppProvider(ABC):
     @abstractmethod
     async def get_instance_state(self) -> str:
         """Provider-reported instance state, e.g. "authorized"."""
+
+    async def get_health(self) -> InstanceHealth:
+        """Everything the provider can say about its own readiness.
+
+        Optional: a provider without these endpoints returns an empty
+        health object, and the status page shows "не сообщается" instead
+        of a made-up number.
+        """
+        return InstanceHealth()
+
+    async def check_number(self, phone: str) -> bool | None:
+        """Does this number have WhatsApp? None = cannot tell."""
+        return None
 
     @abstractmethod
     async def aclose(self) -> None: ...

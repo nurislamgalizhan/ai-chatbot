@@ -66,8 +66,14 @@ export default function LimitsPage() {
 
   const save = useMutation({
     mutationFn: (settings: LimitsSettings) => updateLimits(settings),
-    onSuccess: () => {
-      setNotice("Сохранено. Изменённые бюджеты применены и к текущему дню/месяцу.");
+    onSuccess: (saved) => {
+      // The server may answer with a warning (e.g. the alert number has
+      // no WhatsApp): showing "Сохранено" over it would hide the one
+      // thing the owner needs to act on.
+      setNotice(
+        saved.notice ??
+          "Сохранено. Изменённые бюджеты применены и к текущему дню/месяцу.",
+      );
       void queryClient.invalidateQueries({ queryKey: ["limits"] });
     },
   });
@@ -485,6 +491,42 @@ export default function LimitsPage() {
             onChange={(v) => update({ backup_stale_hours: v })}
           />
         </div>
+      </section>
+
+      <section className="card">
+        <h2>Поведение в WhatsApp</h2>
+        <p className="muted">
+          Возможности самого WhatsApp, не влияющие на расходы на ИИ.
+        </p>
+        <div className="limit-grid">
+          <NumberField
+            label="«Печатает…» перед ответом, мс"
+            value={form.typing_time_ms}
+            onChange={(v) => update({ typing_time_ms: v })}
+            hint="0 — выключено. Не стоит лишних запросов, но задерживает ответ на это время (допустимо 1000–20000)"
+          />
+          <NumberField
+            label="Тревога при очереди у провайдера, сообщений"
+            value={form.provider_queue_alert_depth}
+            onChange={(v) => update({ provider_queue_alert_depth: v })}
+          />
+        </div>
+        <label className="limit-field checkbox">
+          <input
+            type="checkbox"
+            checked={form.quote_customer_message}
+            onChange={(e) => update({ quote_customer_message: e.target.checked })}
+          />
+          <span>Отвечать с цитатой сообщения клиента</span>
+        </label>
+        <label className="limit-field checkbox">
+          <input
+            type="checkbox"
+            checked={form.link_preview_enabled}
+            onChange={(e) => update({ link_preview_enabled: e.target.checked })}
+          />
+          <span>Показывать превью ссылок в ответах бота</span>
+        </label>
       </section>
 
       <section className="card">

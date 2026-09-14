@@ -35,6 +35,7 @@ from app.services.app_settings import get_setting, set_setting
 from app.services.budget import update_open_limits
 from app.services.phone import normalize_phone
 from app.services.pricing import USD_KZT, PricingError, kzt_to_usd, load_usd_kzt_rate
+from app.whatsapp.green_api import GreenApiProvider
 
 router = APIRouter(prefix="/api/limits", tags=["limits"], dependencies=[Depends(require_admin)])
 
@@ -128,6 +129,7 @@ async def update_limits(
     # ("8 701 ..."); the alert channel needs the canonical form, and a
     # typo here means alerts quietly go nowhere.
     raw_phone = str(values.get(app_settings.ALERT_PHONE) or "").strip()
+    notice: str | None = None
     if raw_phone:
         try:
             values[app_settings.ALERT_PHONE] = normalize_phone(raw_phone)
@@ -136,6 +138,11 @@ async def update_limits(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Номер для оповещений указан неверно",
             ) from exc
+        if values[app_settings.ALERT_PHONE] != getattr(current, app_settings.ALERT_PHONE):
+            # Ask the provider whether this number has WhatsApp at all.
+            # A typo here means every alert about a silent bot goes
+            # nowhere — the one message that must never be lost.
+            notice = await _warn_if_no_whatsapp(request, values[app_settings.ALERT_PHONE])
     for name, new_value in values.items():
         if getattr(current, name) == new_value:
             continue
@@ -153,7 +160,27 @@ async def update_limits(
             for name in changed_budget_keys:
                 new_limit_usd = kzt_to_usd(Decimal(str(getattr(body.settings, name))), rate)
                 await update_open_limits(db, _BUDGET_SCOPE_BY_KEY[name], new_limit_usd, today)
-    return await get_limits(request, db)
+    response = await get_limits(request, db)
+    return response.model_copy(update={"notice": notice})
+
+
+async def _warn_if_no_whatsapp(request: Request, phone: str) -> str | None:
+    """None = fine, or we could not check (which is not the owner's
+    problem and must not block saving their own number)."""
+    settings = get_app_settings(request)
+    if not settings.green_api_id_instance or not settings.green_api_token:
+        return None
+    provider = GreenApiProvider(settings)
+    try:
+        exists = await provider.check_number(phone)
+    finally:
+        await provider.aclose()
+    if exists is False:
+        return (
+            "Номер сохранён, но провайдер сообщает, что на нём нет WhatsApp — "
+            "оповещения на него не дойдут. Проверьте номер."
+        )
+    return None
 
 
 @router.post("/fx", response_model=OkResponse)

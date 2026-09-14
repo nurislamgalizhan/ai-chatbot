@@ -65,10 +65,12 @@ function TransportCard({ data }: { data: SystemStatus }) {
     onSuccess: (r) => {
       setResult(
         r.ok
-          ? "Подключение работает: инстанс авторизован."
+          ? "Подключение работает: инстанс авторизован и настроен верно."
           : r.error === "not_configured"
             ? "Ключи WhatsApp не заданы в настройках сервера (.env)."
-            : `Инстанс отвечает, но не готов: ${r.state ?? "нет ответа"}.`,
+            : r.problems.length > 0
+              ? "Инстанс авторизован, но настроен так, что бот не получит сообщения — см. ниже."
+              : `Инстанс отвечает, но не готов: ${r.state ?? "нет ответа"}.`,
       );
       void queryClient.invalidateQueries({ queryKey: ["system-status"] });
     },
@@ -107,6 +109,22 @@ function TransportCard({ data }: { data: SystemStatus }) {
       </div>
       {t.last_error && (
         <div className="plaque warn">Последняя ошибка связи: {t.last_error}</div>
+      )}
+      {t.settings_problems.length > 0 && (
+        <div className="plaque danger">
+          <strong>Бот не получает сообщения.</strong>
+          <ul className="tight-list">
+            {t.settings_problems.map((problem) => (
+              <li key={problem}>{problem}</li>
+            ))}
+          </ul>
+          Исправляется в панели GREEN-API, в настройках инстанса.
+        </div>
+      )}
+      {t.settings_checked_at && t.settings_problems.length === 0 && (
+        <p className="muted">
+          Настройки инстанса проверены {when(t.settings_checked_at)} — замечаний нет.
+        </p>
       )}
       <div className="row-actions">
         <button type="button" onClick={() => check.mutate()} disabled={check.isPending}>
@@ -266,6 +284,12 @@ export default function SystemPage() {
             <span className="caption">Ошибок за сутки</span>
           </div>
         </div>
+        <p className="muted">
+          «Ждут отправки» — наша очередь. Есть ещё очередь у провайдера: если
+          номер разлогинится, ответы будут лежать там до суток, а здесь
+          отображаться как отправленные. Она проверяется автоматически раз в
+          полчаса, а также кнопкой «Проверить подключение».
+        </p>
       </section>
 
       <section className="card">

@@ -37,6 +37,10 @@ export interface LimitsSettings {
   retention_faq_misses_days: number;
   retention_audit_log_days: number;
   retention_transport_days: number;
+  typing_time_ms: number;
+  link_preview_enabled: boolean;
+  quote_customer_message: boolean;
+  provider_queue_alert_depth: number;
 }
 
 export interface PriceItem {
@@ -55,6 +59,7 @@ export interface LedgerSnapshot {
 }
 
 export interface LimitsResponse {
+  notice?: string | null;
   settings: LimitsSettings;
   prices: PriceItem[];
   usd_kzt_rate: string | null;

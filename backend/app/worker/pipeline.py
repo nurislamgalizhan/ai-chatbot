@@ -33,6 +33,7 @@ from app.models.enums import (
     CallType,
     KbLanguage,
     LastActor,
+    MediaType,
     MsgDirection,
     MsgSource,
     MsgState,
@@ -72,6 +73,9 @@ class _Claim:
     retry_count: int
     language: KbLanguage
     generation_input: GenerationInput
+    #: Provider id of the customer message being answered, so the reply
+    #: can quote it. None when the provider gave us no id.
+    quote_provider_message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,11 @@ class _MediaAck:
     correlation_id: str
     language: KbLanguage
     style: str | None
+    #: Which service wording to use. A real file ("media") and a pin on
+    #: the map or a contact card ("unsupported_content") are different
+    #: things, and telling a customer "I passed your FILE to a manager"
+    #: when they sent their location reads as a broken bot.
+    reason: str = "media"
 
 
 @dataclass(frozen=True)
@@ -391,7 +400,14 @@ class AiPipeline:
                     text_messages.append(message)
                 elif message.media_type is not None:
                     message.state = MsgState.HANDED_TO_HUMAN
-                    message.error_code = "media_unsupported"
+                    # OTHER is not a file: it is content we describe in
+                    # words (location, contact card, poll). Everything
+                    # else here IS a file we do not read.
+                    message.error_code = (
+                        "unsupported_content"
+                        if message.media_type is MediaType.OTHER
+                        else "media_unsupported"
+                    )
                     media_messages.append(message)
                 elif not (message.body or "").strip():
                     message.state = MsgState.IGNORED
@@ -459,6 +475,9 @@ class AiPipeline:
                 message_ids=[m.id for m in text_messages],
                 retry_count=retry_count,
                 language=language,
+                # The LAST message of the batch is the one the answer
+                # addresses, so that is what it quotes.
+                quote_provider_message_id=text_messages[-1].provider_message_id,
                 generation_input=GenerationInput(
                     correlation_id=correlation_id,
                     question=question,
@@ -592,6 +611,11 @@ class AiPipeline:
                     outcome.text,
                     reply_outbound_id(claim.correlation_id),
                     claim.correlation_id,
+                    quoted_message_id=(
+                        claim.quote_provider_message_id
+                        if await get_setting(db, app_settings.QUOTE_CUSTOMER_MESSAGE)
+                        else None
+                    ),
                 )
                 terminal = (
                     MsgState.BLOCKED_BY_LIMIT
@@ -728,6 +752,13 @@ class AiPipeline:
             correlation_id=f"chat:{chat.id}:media:{media_messages[-1].id}",
             language=language,
             style=instruction.style if instruction else None,
+            # If ANY of the batch is a real file, the file wording is the
+            # honest one; a lone location or contact gets its own.
+            reason=(
+                "media"
+                if any(m.media_type is not MediaType.OTHER for m in media_messages)
+                else "unsupported_content"
+            ),
         )
 
     async def _send_media_ack(self, ack: _MediaAck) -> None:
@@ -738,7 +769,7 @@ class AiPipeline:
         """
         reply = await compose_service_reply(
             self._deps,
-            reason="media",
+            reason=ack.reason,
             language=ack.language,
             correlation_id=ack.correlation_id,
             chat_id=ack.chat_id,

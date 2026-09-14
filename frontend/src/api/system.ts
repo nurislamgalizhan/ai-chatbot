@@ -19,6 +19,10 @@ export interface SystemStatus {
     last_polled_at: string | null;
     last_error: string | null;
     state: string | null;
+    state_checked_at: string | null;
+    settings_checked_at: string | null;
+    settings_problems: string[];
+    provider_settings: Record<string, unknown>;
   };
   model: string;
   openai_configured: boolean;
@@ -93,10 +97,12 @@ export const getSystemEvents = (level: "all" | "error", limit = 50) =>
   );
 
 export const checkConnection = () =>
-  api<{ ok: boolean; state: string | null; error: string | null }>(
-    "POST",
-    "/api/system/check-connection",
-  );
+  api<{
+    ok: boolean;
+    state: string | null;
+    error: string | null;
+    problems: string[];
+  }>("POST", "/api/system/check-connection");
 
 export const sendTestAlert = () =>
   api<{ queued: boolean; will_send: boolean; reason: string | null }>(

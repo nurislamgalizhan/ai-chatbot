@@ -30,6 +30,11 @@ class WhatsappInstance(Base):
     #: endpoint on every render.
     state: Mapped[str | None] = mapped_column(Text)
     state_checked_at: Mapped[datetime | None]
+    #: The instance's own configuration as last read from the provider.
+    #: Only the fields that decide whether the bot can work are kept —
+    #: never the webhook token or anything else sensitive.
+    settings_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    settings_checked_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -86,6 +91,8 @@ class WaOutbox(Base):
     #: customer | alert. An alert is for the OWNER's own number: DRY_RUN
     #: silences the customer channel, never the alarm bell.
     purpose: Mapped[str] = mapped_column(Text, server_default=text("'customer'"))
+    #: The customer message this send quotes (provider id), if any.
+    quoted_message_id: Mapped[str | None] = mapped_column(Text)
     body: Mapped[str | None] = mapped_column(Text)  # message text or caption
     file_ref: Mapped[str | None] = mapped_column(Text)  # local path for kind=file
     # PENDING -> SENT | SKIPPED_DRY_RUN | FAILED_RETRYABLE -> FAILED_FINAL

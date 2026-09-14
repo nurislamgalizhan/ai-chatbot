@@ -19,18 +19,20 @@ from sqlalchemy.exc import DBAPIError
 from app.models import Chat, InboundNotification, Message, SystemEvent, WaOutbox
 from app.models.enums import (
     AttentionClearedReason,
+    AttentionReason,
     MediaType,
     MsgDirection,
     MsgSource,
     MsgState,
 )
 from app.services import app_settings
-from app.services.alerts import is_alert_chat
+from app.services.alerts import hour_bucket, is_alert_chat, record_alert
 from app.services.app_settings import get_setting
 from app.services.chat_modes import on_operator_message
 from app.services.chats import (
     clear_attention,
     insert_inbound_message,
+    set_attention,
     upsert_chat_for_incoming,
     upsert_chat_for_outgoing,
 )
@@ -44,6 +46,19 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _BATCH_SIZE = 50
+
+#: Incoming kinds that become a message row. Reactions and stickers are
+#: here too — they belong in the history — but they are never queued for
+#: the AI (see `_handle_incoming`).
+_STORED_INCOMING_KINDS = frozenset(
+    {
+        Kind.INCOMING_PRIVATE,
+        Kind.INCOMING_STICKER,
+        Kind.INCOMING_REACTION,
+        Kind.INCOMING_EDITED,
+        Kind.INCOMING_UNSUPPORTED,
+    }
+)
 
 
 def _ts(parsed_timestamp: int | None) -> datetime | None:
@@ -140,19 +155,23 @@ async def _process_one(db: AsyncSession, row: InboundNotification) -> None:
         logger.info("alert_channel_notification_ignored", inbound_id=row.id)
         return
 
-    if classified.kind in (Kind.INCOMING_PRIVATE, Kind.INCOMING_STICKER):
-        await _handle_incoming(db, row, body, is_sticker=classified.kind is Kind.INCOMING_STICKER)
+    if classified.kind in _STORED_INCOMING_KINDS:
+        await _handle_incoming(db, row, body, kind=classified.kind)
+    elif classified.kind is Kind.INCOMING_DELETED:
+        await _handle_deleted(db, row, body)
     elif classified.kind is Kind.OUTGOING_PHONE:
         await _handle_operator_phone(db, row, body)
     elif classified.kind is Kind.OUTGOING_API:
         await _handle_api_echo(db, row, body)
     elif classified.kind is Kind.DELIVERY_STATUS:
         await _handle_delivery_status(db, body)
+    elif classified.kind is Kind.QUOTA_EXCEEDED:
+        await _handle_quota_exceeded(db, body)
     # INSTANCE_EVENT rows stay as raw history for the status page.
 
 
 async def _handle_incoming(
-    db: AsyncSession, row: InboundNotification, body: dict[str, Any], *, is_sticker: bool
+    db: AsyncSession, row: InboundNotification, body: dict[str, Any], *, kind: Kind
 ) -> None:
     wa_chat_id = str((body.get("senderData") or {}).get("chatId", ""))
     parsed = parse_message(body)
@@ -164,24 +183,45 @@ async def _handle_incoming(
         phone_from_wa_chat_id(wa_chat_id),
         parsed.sender_name,
     )
-    # Stickers: fully ignored — no AI, no reply, but visible in history.
-    state = MsgState.IGNORED if is_sticker else MsgState.QUEUED
-    media = MediaType.STICKER if is_sticker else parsed.media_type
+    # Stickers and REACTIONS are stored so the history is true, and never
+    # answered: a reaction is not a question. This is about the reaction
+    # notification type only — a text message containing emoji
+    # ("Здравствуйте 😊 сколько стоит зал?") is an ordinary question and
+    # takes the normal QUEUED path below.
+    silent = kind in (Kind.INCOMING_STICKER, Kind.INCOMING_REACTION)
+    state = MsgState.IGNORED if silent else MsgState.QUEUED
+    media: MediaType | None
+    if kind is Kind.INCOMING_STICKER:
+        media = MediaType.STICKER
+    elif kind is Kind.INCOMING_REACTION:
+        media = MediaType.OTHER
+    else:
+        media = parsed.media_type
+    body_text = parsed.text
+    if kind is Kind.INCOMING_REACTION:
+        emoji = (
+            _dict_get(body, "messageData", "extendedTextMessageData", "text")
+            or _dict_get(body, "messageData", "reactionMessageData", "text")
+            or ""
+        )
+        body_text = f"[реакция] {emoji}".strip()
     message_id = await insert_inbound_message(
         db,
         chat_id,
         source=MsgSource.CUSTOMER,
         state=state,
         provider_message_id=provider_message_id,
-        body=parsed.text,
+        body=body_text,
         media_type=media,
+        error_code="reaction" if kind is Kind.INCOMING_REACTION else None,
         sent_at=_ts(parsed.timestamp),
     )
     # Voice and images need a paid pre-processing step before the AI can
     # answer them; the job carries the download URL, which is available
     # only here, while the raw payload is at hand (phase 7). Everything
-    # else (documents, video, gif, stickers) never goes to OpenAI.
-    if message_id is not None and media is not None and not is_sticker:
+    # else (documents, video, gif, stickers, reactions) never goes to
+    # OpenAI.
+    if message_id is not None and media is not None and not silent:
         await enqueue_media_job(
             db,
             message_id=message_id,
@@ -190,6 +230,68 @@ async def _handle_incoming(
             download_url=parsed.download_url,
             mime_type=parsed.mime_type,
         )
+
+
+def _dict_get(body: dict[str, Any], *path: str) -> str:
+    """Read a nested string from an untrusted payload."""
+    current: Any = body
+    for key in path:
+        current = current.get(key) if isinstance(current, dict) else None
+    return str(current) if isinstance(current, str) else ""
+
+
+async def _handle_deleted(db: AsyncSession, row: InboundNotification, body: dict[str, Any]) -> None:
+    """The customer deleted a message.
+
+    If we had not answered it yet, we must not answer it now: replying to
+    a retracted question is worse than staying silent. The deletion
+    itself is not shown as a new message — it changes the old one.
+    """
+    stanza_id = _dict_get(body, "messageData", "deletedMessageData", "stanzaId")
+    if not stanza_id:
+        return
+    result = await db.execute(
+        update(Message)
+        .where(
+            Message.provider_message_id == stanza_id,
+            Message.direction == MsgDirection.IN,
+            Message.state.in_((MsgState.QUEUED, MsgState.RECEIVED)),
+        )
+        .values(state=MsgState.IGNORED, error_code="deleted_by_customer", next_attempt_at=None)
+    )
+    cancelled = int(getattr(result, "rowcount", 0) or 0)
+    logger.info("customer_deleted_message", inbound_id=row.id, cancelled=cancelled)
+
+
+async def _handle_quota_exceeded(db: AsyncSession, body: dict[str, Any]) -> None:
+    """The provider's plan limit is reached: chats stop working.
+
+    Recorded AND alerted: this is precisely the state where the bot looks
+    healthy from the inside and delivers nothing.
+    """
+    raw_quota = body.get("quotaData")
+    quota: dict[str, Any] = raw_quota if isinstance(raw_quota, dict) else {}
+    detail = {
+        key: quota[key]
+        for key in ("method", "used", "total", "status")
+        if quota.get(key) is not None
+    }
+    db.add(
+        SystemEvent(
+            level="critical",
+            component="receiver",
+            event="provider_quota_exceeded",
+            detail=detail,
+        )
+    )
+    await record_alert(
+        db,
+        kind="system",
+        event_key="quota_exceeded",
+        period_key=hour_bucket(),
+        detail=detail,
+    )
+    logger.error("provider_quota_exceeded", **detail)
 
 
 async def _handle_operator_phone(
@@ -261,16 +363,60 @@ async def _handle_api_echo(
     )
 
 
+#: Delivery statuses that mean the customer did NOT get the message.
+_FAILED_STATUSES = frozenset({"failed", "noAccount", "notInGroup"})
+#: The provider suspended the number for spam-like activity. This is not
+#: one message failing — it is the whole channel at risk.
+_YELLOW_CARD = "yellowCard"
+
+
 async def _handle_delivery_status(db: AsyncSession, body: dict[str, Any]) -> None:
     id_message = body.get("idMessage")
     status = body.get("status")
     if not id_message or not isinstance(status, str):
         return
-    await db.execute(
-        update(Message)
-        .where(Message.provider_message_id == str(id_message))
-        .values(delivery_status=status[:50])
+    message = (
+        await db.execute(
+            select(Message).where(Message.provider_message_id == str(id_message)).limit(1)
+        )
+    ).scalar_one_or_none()
+    if message is None:
+        return
+    message.delivery_status = status[:50]
+
+    if status == _YELLOW_CARD:
+        # Recorded and alerted: losing this number takes the whole bot
+        # down, and the owner can only react if they are told.
+        db.add(
+            SystemEvent(
+                level="critical",
+                component="transport",
+                event="number_suspended",
+                detail={"status": status},
+            )
+        )
+        await record_alert(db, kind="system", event_key="yellow_card", period_key=hour_bucket())
+        logger.error("number_suspended", status=status)
+        return
+
+    if status not in _FAILED_STATUSES:
+        return
+
+    # The answer was written, sent, and never arrived. Nobody would ever
+    # notice: the panel used to store the status and show nothing.
+    chat = await db.get(Chat, message.chat_id)
+    if chat is not None:
+        await set_attention(db, chat, AttentionReason.PROCESSING_ERROR, message.correlation_id)
+    db.add(
+        SystemEvent(
+            level="error",
+            component="transport",
+            event="delivery_failed",
+            detail={"status": status, "chat_id": message.chat_id},
+            correlation_id=message.correlation_id,
+        )
     )
+    logger.warning("delivery_failed", status=status, chat_id=message.chat_id)
 
 
 async def reconcile_outbox(db: AsyncSession) -> int:

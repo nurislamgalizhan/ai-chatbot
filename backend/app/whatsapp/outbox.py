@@ -21,6 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models import SystemEvent, WaOutbox
+from app.services import app_settings
+from app.services.app_settings import get_setting
 from app.whatsapp.provider import ProviderError
 
 if TYPE_CHECKING:
@@ -38,6 +40,9 @@ ALERT_PURPOSE = "alert"
 #: exhausting its attempts while the outage is still going on.
 _ALERT_BACKOFF_BASE_SECONDS = 60
 _ALERT_MAX_ATTEMPTS = 6
+#: How long the flusher may reuse the owner's send options before
+#: re-reading them (a changed setting takes effect within a minute).
+_OPTIONS_TTL_SECONDS = 60
 
 
 async def enqueue_text(
@@ -48,6 +53,7 @@ async def enqueue_text(
     outbound_message_id: uuid.UUID,
     correlation_id: str | None = None,
     purpose: str = "customer",
+    quoted_message_id: str | None = None,
 ) -> bool:
     """Queue a text send; returns False if this id is already queued.
 
@@ -65,6 +71,7 @@ async def enqueue_text(
             body=text,
             correlation_id=correlation_id,
             purpose=purpose,
+            quoted_message_id=quoted_message_id,
         )
         .on_conflict_do_nothing(constraint="uq_wa_outbox_outbound_message_id")
         .returning(WaOutbox.id)
@@ -96,6 +103,23 @@ class OutboxFlusher:
         self._sessionmaker = sessionmaker
         self._provider = provider
         self._settings = settings
+        #: Owner-facing send options, refreshed on a slow cadence rather
+        #: than read per message.
+        self._typing_time_ms: int = 0
+        self._link_preview: bool = False
+        self._options_read_at: datetime | None = None
+
+    async def _refresh_options(self) -> None:
+        now = datetime.now(UTC)
+        if (
+            self._options_read_at is not None
+            and (now - self._options_read_at).total_seconds() < _OPTIONS_TTL_SECONDS
+        ):
+            return
+        async with self._sessionmaker() as db:
+            self._typing_time_ms = int(await get_setting(db, app_settings.TYPING_TIME_MS))
+            self._link_preview = bool(await get_setting(db, app_settings.LINK_PREVIEW_ENABLED))
+        self._options_read_at = now
 
     async def flush_once(self) -> int:
         """Attempt due sends; returns how many rows changed state.
@@ -107,6 +131,7 @@ class OutboxFlusher:
         messages — and the next pass would send them again. Per-row
         commits reduce that window to the single message in flight.
         """
+        await self._refresh_options()
         async with self._sessionmaker() as db:
             due = (
                 (
@@ -178,7 +203,17 @@ class OutboxFlusher:
                     row.wa_chat_id, row.file_ref, row.file_ref.rsplit("/", 1)[-1], row.body
                 )
             else:
-                result = await self._provider.send_text(row.wa_chat_id, row.body or "")
+                result = await self._provider.send_text(
+                    row.wa_chat_id,
+                    row.body or "",
+                    quoted_message_id=row.quoted_message_id,
+                    # The typing indicator and link previews are owner
+                    # settings, read once per flusher (see `refresh`):
+                    # a per-message settings query would put a database
+                    # round-trip on the send path.
+                    typing_time_ms=self._typing_time_ms if row.purpose != ALERT_PURPOSE else None,
+                    link_preview=self._link_preview,
+                )
         except ProviderError as exc:
             self._fail(db, row, f"provider:{exc.status_code}", retryable=exc.retryable)
             return

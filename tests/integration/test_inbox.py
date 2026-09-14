@@ -32,7 +32,15 @@ class FakeProvider(WhatsAppProvider):
             raise ProviderError("deleteNotification", status_code=502, retryable=True)
         self.deleted.append(receipt_id)
 
-    async def send_text(self, chat_id: str, text: str) -> SendResult:
+    async def send_text(  # noqa: PLR0913 - mirrors the provider interface
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        quoted_message_id: str | None = None,
+        typing_time_ms: int | None = None,
+        link_preview: bool = True,
+    ) -> SendResult:
         raise AssertionError("transport receiver must never send")
 
     async def send_file(

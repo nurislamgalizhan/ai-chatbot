@@ -106,6 +106,7 @@ async def insert_inbound_message(
     direction: MsgDirection = MsgDirection.IN,
     sent_at: datetime | None = None,
     correlation_id: str | None = None,
+    error_code: str | None = None,
 ) -> int | None:
     """Insert a message from a notification; None if it already exists."""
     stmt = (
@@ -120,6 +121,7 @@ async def insert_inbound_message(
             state=state,
             sent_at=sent_at,
             correlation_id=correlation_id,
+            error_code=error_code,
         )
         .on_conflict_do_nothing(
             index_elements=["chat_id", "provider_message_id"],

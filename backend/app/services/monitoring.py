@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy import func, select
 
-from app.models import InboundNotification, Message, SystemEvent, WaOutbox
+from app.models import InboundNotification, Message, SystemEvent, WaOutbox, WhatsappInstance
 from app.models.enums import MsgState
 from app.services import app_settings
 from app.services.alerts import hour_bucket, record_alert
@@ -29,6 +29,8 @@ from app.services.app_settings import get_setting
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from app.whatsapp.provider import WhatsAppProvider
 
 logger = structlog.get_logger(__name__)
 
@@ -121,6 +123,110 @@ async def collect(db: AsyncSession, *, media_dir: str) -> SystemSnapshot:
         disk_free_bytes=usage.free,
         last_backup_at=last_backup,
     )
+
+
+async def check_provider(
+    sessionmaker: async_sessionmaker[AsyncSession], provider: WhatsAppProvider | None
+) -> list[str]:
+    """Ask the provider about ITSELF and alert on what it says.
+
+    Three failures live only here, and each one makes the bot silent
+    while every internal number looks healthy:
+    * the instance is configured to deliver notifications to a webhook,
+      so our polling queue is empty forever;
+    * notifications pile up on the provider's side because we are not
+      collecting them;
+    * our sends sit in the provider's outgoing queue (up to 24 hours)
+      because the instance is not authorized.
+    """
+    if provider is None:
+        return []
+    raised: list[str] = []
+    try:
+        health = await provider.get_health()
+    except Exception:
+        logger.exception("provider_health_failed")
+        return []
+
+    async with sessionmaker() as db:
+        bucket = hour_bucket()
+        depth_limit = int(await get_setting(db, app_settings.PROVIDER_QUEUE_ALERT_DEPTH))
+
+        if health.settings:
+            instance = (
+                await db.execute(
+                    select(WhatsappInstance)
+                    .where(WhatsappInstance.is_active.is_(True))
+                    .order_by(WhatsappInstance.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if instance is not None:
+                instance.settings_json = dict(health.settings)
+                instance.settings_checked_at = datetime.now(UTC)
+
+        if health.settings_problems and await record_alert(
+            db,
+            kind="system",
+            event_key="instance_misconfigured",
+            period_key=datetime.now(UTC).date().isoformat(),
+            detail={"problems": health.settings_problems[:3]},
+        ):
+            raised.append("instance_misconfigured")
+            db.add(
+                SystemEvent(
+                    level="critical",
+                    component="monitoring",
+                    event="instance_misconfigured",
+                    detail={"problems": health.settings_problems},
+                )
+            )
+
+        if (
+            health.incoming_queue is not None
+            and health.incoming_queue >= depth_limit
+            and await record_alert(
+                db,
+                kind="system",
+                event_key="provider_incoming_queue",
+                period_key=bucket,
+                detail={"depth": health.incoming_queue},
+            )
+        ):
+            raised.append("provider_incoming_queue")
+            db.add(
+                SystemEvent(
+                    level="warning",
+                    component="monitoring",
+                    event="provider_incoming_queue",
+                    detail={"depth": health.incoming_queue},
+                )
+            )
+
+        if (
+            health.outgoing_queue is not None
+            and health.outgoing_queue >= depth_limit
+            and await record_alert(
+                db,
+                kind="system",
+                event_key="provider_outgoing_queue",
+                period_key=bucket,
+                detail={"depth": health.outgoing_queue},
+            )
+        ):
+            raised.append("provider_outgoing_queue")
+            db.add(
+                SystemEvent(
+                    level="error",
+                    component="monitoring",
+                    event="provider_outgoing_queue",
+                    detail={"depth": health.outgoing_queue, "socket": health.socket},
+                )
+            )
+        await db.commit()
+    if raised:
+        logger.warning("provider_alerts", raised=raised)
+    return raised
 
 
 async def check_and_alert(
