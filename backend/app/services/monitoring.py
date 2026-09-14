@@ -16,6 +16,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
@@ -68,6 +69,24 @@ class SystemSnapshot:
         return int(delta.total_seconds() // 3600)
 
 
+def disk_usage_for(path: str) -> shutil._ntuple_diskusage:
+    """Disk usage of the filesystem behind `path`.
+
+    The media volume may not be mounted where this process runs (the API
+    container mounts it read-only; a host-side tool may have no volume at
+    all). Reporting the nearest existing parent is still a true number
+    for the same disk — a crash here would make the whole «Система» page
+    unavailable over a directory that is only relevant to the worker.
+    """
+    candidate = Path(path)
+    for probe in (candidate, *candidate.parents):
+        if probe.exists():
+            if probe != candidate:
+                logger.warning("media_dir_missing_using_parent", media_dir=path, used=str(probe))
+            return shutil.disk_usage(probe)
+    return shutil.disk_usage(Path.cwd())  # pragma: no cover - "/" always exists
+
+
 async def collect(db: AsyncSession, *, media_dir: str) -> SystemSnapshot:
     now = datetime.now(UTC)
     queue_depth = (
@@ -112,7 +131,7 @@ async def collect(db: AsyncSession, *, media_dir: str) -> SystemSnapshot:
         )
     ).scalar()
 
-    usage = shutil.disk_usage(media_dir)
+    usage = disk_usage_for(media_dir)
     return SystemSnapshot(
         queue_depth=int(queue_depth),
         oldest_queued_minutes=int((now - oldest).total_seconds() // 60) if oldest else 0,

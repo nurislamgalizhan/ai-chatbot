@@ -5,12 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 _EFFORT_PATTERN = "^(none|low|medium|high|xhigh|max)$"
 
 
 class InstructionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     system_prompt: str = Field(min_length=20, max_length=20_000)
     style: str | None = Field(default=None, max_length=4_000)
     # {"handoff": {"ru": ..., "kk": ..., "en": ...}, "offtopic": {...}}
@@ -37,6 +39,8 @@ class InstructionListResponse(BaseModel):
 
 
 class SandboxRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     question: str = Field(min_length=1, max_length=2_000)
 
 

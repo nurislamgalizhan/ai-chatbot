@@ -46,6 +46,7 @@ from app.services.app_settings import get_setting
 from app.services.chat_memory import remember, snapshot
 from app.services.chat_modes import ai_allowed
 from app.services.chats import set_attention
+from app.services.escalation import escalation_reason
 from app.services.generation import (
     GenerationInput,
     compose_service_reply,
@@ -635,17 +636,23 @@ class AiPipeline:
                 if outcome.paid:
                     # недочёт №7: the dialog's running cost is real now.
                     chat.total_cost_usd = chat.total_cost_usd + outcome.cost_usd
+                # The model has no way to call a manager (no tools) and an
+                # FAQ answer never sees the model: a request for a person
+                # or a booking is recognised HERE, from the customer's own
+                # words, or the manager would never learn about it.
+                escalation = escalation_reason(claim.generation_input.question)
                 if outcome.kind == "blocked_limit":
                     await set_attention(
                         db, chat, AttentionReason.BLOCKED_BY_LIMIT, claim.correlation_id
                     )
-                elif outcome.handoff or outcome.kind == "no_data":
+                elif outcome.handoff or outcome.kind == "no_data" or escalation is not None:
                     await set_attention(db, chat, AttentionReason.HANDOFF, claim.correlation_id)
                 await remember(
                     db,
                     claim.chat_id,
                     text=claim.generation_input.question,
                     language=claim.language,
+                    handoff_required=True if escalation is not None else None,
                 )
                 if outcome.ai_call_id is not None and reply_id is not None:
                     await db.execute(

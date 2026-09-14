@@ -21,6 +21,7 @@ from app.ai.guardrails import PROMPT_CANARY
 from app.ai.tokens import count_tokens
 
 if TYPE_CHECKING:
+    from app.models.enums import KbLanguage
     from app.services.kb_search import RetrievedChunk
 
 logger = structlog.get_logger(__name__)
@@ -42,6 +43,15 @@ SECURITY_RULES = f"""ПРАВИЛА БЕЗОПАСНОСТИ (обязатель
 _HISTORY_LIMIT = 10
 _MIN_HISTORY = 2
 
+#: Rendered as "Язык клиента: kk (казахский)". The code comes first so a
+#: test double (and a human reading the log) can pick it up reliably.
+LANGUAGE_NAMES = {"ru": "русский", "kk": "казахский", "en": "английский"}
+
+
+def language_line(language: KbLanguage) -> str:
+    code = language.value
+    return f"Язык клиента: {code} ({LANGUAGE_NAMES.get(code, code)}). Отвечай на этом языке."
+
 
 @dataclass(frozen=True)
 class HistoryTurn:
@@ -59,6 +69,13 @@ class ContextInput:
     history: list[HistoryTurn]
     question: str
     max_input_tokens: int
+    #: The customer's language as the pipeline detected it. Named
+    #: explicitly because the retrieved chunks are almost always Russian:
+    #: "answer in the customer's language" alone lets a model drift into
+    #: the language of its sources — the exact failure the owner's
+    #: language policy forbids (a Kazakh question must get a Kazakh
+    #: answer, never the Russian text of the knowledge base).
+    language: KbLanguage | None = None
 
 
 @dataclass(frozen=True)
@@ -82,9 +99,14 @@ def _chunks_block(chunks: list[RetrievedChunk]) -> str:
 
 
 def _context_block(
-    memory: dict[str, Any] | None, summary: str | None, chunks: list[RetrievedChunk]
+    memory: dict[str, Any] | None,
+    summary: str | None,
+    chunks: list[RetrievedChunk],
+    language: KbLanguage | None = None,
 ) -> str:
     parts: list[str] = []
+    if language is not None:
+        parts.append(language_line(language))
     if memory:
         parts.append("Память диалога (JSON): " + json.dumps(memory, ensure_ascii=False))
     if summary:
@@ -113,7 +135,7 @@ def build_context(data: ContextInput) -> BuiltContext:
 
     def assemble() -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
-        block = _context_block(data.memory, summary, chunks)
+        block = _context_block(data.memory, summary, chunks, data.language)
         if block:
             messages.append({"role": "system", "content": block})
         messages.extend({"role": t.role, "content": t.content} for t in history)

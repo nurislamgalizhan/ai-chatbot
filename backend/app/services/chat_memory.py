@@ -54,12 +54,17 @@ async def remember(
     text: str,
     language: KbLanguage,
     interest: str | None = None,
+    handoff_required: bool | None = None,
 ) -> None:
     """Upsert the single memory row for the chat."""
-    updates = extract_updates(text)
+    updates: dict[str, Any] = dict(extract_updates(text))
     updates["language"] = language.value
     if interest:
         updates["interest"] = interest
+    if handoff_required is not None:
+        # Visible to the model through `snapshot`: once a manager has been
+        # asked for, the bot should not keep promising to "pass it on".
+        updates["handoff_required"] = handoff_required
     stmt = (
         pg_insert(ChatMemory)
         .values(chat_id=chat_id, **updates)

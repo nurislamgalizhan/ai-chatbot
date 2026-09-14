@@ -12,6 +12,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.ai.embeddings import (
     EmbeddingError,
     EmbeddingProvider,
@@ -22,8 +25,6 @@ from app.models import AiCall, KbChunk, KbDocument, KbProcessingLog
 from app.models.enums import CallType, DocStatus, KbLanguage, SourceType
 from app.services.kb_indexing import index_document, process_pending_documents
 from app.services.kb_search import search_chunks
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 DIMENSIONS = 1536
 
@@ -50,12 +51,18 @@ class ScriptedEmbeddings(EmbeddingProvider):
         self.mapping = mapping
         self.calls = 0
 
+    def _lookup(self, text: str) -> list[float]:
+        # Chunks are embedded WITH their document title on the first line
+        # (kb_indexing.embedding_input); the scripts are keyed by body.
+        if text in self.mapping:
+            return self.mapping[text]
+        _, _, body = text.partition("\n")
+        return self.mapping.get(body, unit_vector(3.14159))
+
     async def embed(self, texts: list[str]) -> EmbeddingResult:
         self.calls += 1
-        vectors = [self.mapping.get(t, unit_vector(3.14159)) for t in texts]
-        return EmbeddingResult(
-            vectors=vectors, model=self.model, total_tokens=len(texts)
-        )
+        vectors = [self._lookup(t) for t in texts]
+        return EmbeddingResult(vectors=vectors, model=self.model, total_tokens=len(texts))
 
 
 class BrokenEmbeddings(EmbeddingProvider):
@@ -132,16 +139,10 @@ async def test_indexing_creates_chunks_and_log(db_engine, settings_rag) -> None:
     async with maker() as db:
         document = await db.get(KbDocument, doc_id)
         chunks = (
-            (await db.execute(select(KbChunk).where(KbChunk.document_id == doc_id)))
-            .scalars()
-            .all()
+            (await db.execute(select(KbChunk).where(KbChunk.document_id == doc_id))).scalars().all()
         )
         log = (
-            (
-                await db.execute(
-                    select(KbProcessingLog).where(KbProcessingLog.document_id == doc_id)
-                )
-            )
+            (await db.execute(select(KbProcessingLog).where(KbProcessingLog.document_id == doc_id)))
             .scalars()
             .all()
         )
@@ -156,9 +157,7 @@ async def test_indexing_creates_chunks_and_log(db_engine, settings_rag) -> None:
 async def test_reindexing_is_idempotent(db_engine, settings_rag) -> None:
     """A rerun replaces chunks instead of duplicating them (the unique
     (document_id, chunk_index) index makes duplication impossible)."""
-    doc_id = await make_document(
-        db_engine, title="Аренда", body="Зал 26000 тенге в час."
-    )
+    doc_id = await make_document(db_engine, title="Аренда", body="Зал 26000 тенге в час.")
     provider = FakeEmbeddingProvider()
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
 
@@ -170,19 +169,13 @@ async def test_reindexing_is_idempotent(db_engine, settings_rag) -> None:
 
     async with maker() as db:
         chunks = (
-            (await db.execute(select(KbChunk).where(KbChunk.document_id == doc_id)))
-            .scalars()
-            .all()
+            (await db.execute(select(KbChunk).where(KbChunk.document_id == doc_id))).scalars().all()
         )
     assert len(chunks) == 1
 
 
-async def test_draft_and_archived_documents_are_not_indexed(
-    db_engine, settings_rag
-) -> None:
-    draft = await make_document(
-        db_engine, title="Черновик", body="текст", status=DocStatus.DRAFT
-    )
+async def test_draft_and_archived_documents_are_not_indexed(db_engine, settings_rag) -> None:
+    draft = await make_document(db_engine, title="Черновик", body="текст", status=DocStatus.DRAFT)
     archived = await make_document(
         db_engine, title="Архив", body="текст", status=DocStatus.ARCHIVED
     )
@@ -208,11 +201,7 @@ async def test_embedding_failure_marks_document_failed(db_engine, settings_rag) 
     async with maker() as db:
         document = await db.get(KbDocument, doc_id)
         log = (
-            (
-                await db.execute(
-                    select(KbProcessingLog).where(KbProcessingLog.document_id == doc_id)
-                )
-            )
+            (await db.execute(select(KbProcessingLog).where(KbProcessingLog.document_id == doc_id)))
             .scalars()
             .all()
         )
@@ -221,9 +210,7 @@ async def test_embedding_failure_marks_document_failed(db_engine, settings_rag) 
     assert log[-1].status == "failed"
 
 
-async def test_failure_after_paid_embed_costs_exactly_one_attempt(
-    db_engine, settings_rag
-) -> None:
+async def test_failure_after_paid_embed_costs_exactly_one_attempt(db_engine, settings_rag) -> None:
     """Недочёт №1: a failure AFTER the paid embed call (chunks cannot be
     written) must mark the document `failed` after ONE attempt. Before the
     fix only EmbeddingError was caught, so the document stayed `pending`
@@ -238,11 +225,7 @@ async def test_failure_after_paid_embed_costs_exactly_one_attempt(
     async with maker() as db:
         document = await db.get(KbDocument, doc_id)
         log = (
-            (
-                await db.execute(
-                    select(KbProcessingLog).where(KbProcessingLog.document_id == doc_id)
-                )
-            )
+            (await db.execute(select(KbProcessingLog).where(KbProcessingLog.document_id == doc_id)))
             .scalars()
             .all()
         )
@@ -266,11 +249,7 @@ async def test_teaching_the_bot_is_recorded_as_spend(db_engine, settings_rag) ->
 
     async with maker() as db:
         calls = (
-            (
-                await db.execute(
-                    select(AiCall).where(AiCall.call_type == CallType.EMBEDDING)
-                )
-            )
+            (await db.execute(select(AiCall).where(AiCall.call_type == CallType.EMBEDDING)))
             .scalars()
             .all()
         )
@@ -278,6 +257,44 @@ async def test_teaching_the_bot_is_recorded_as_spend(db_engine, settings_rag) ->
     assert calls[0].chat_id is None  # the owner's own work, not a customer answer
     assert calls[0].input_tokens > 0
     assert f"{doc_id}" in calls[0].correlation_id
+
+
+async def test_embedding_spend_is_priced_from_the_input_price_alone(
+    db_engine, settings_rag
+) -> None:
+    """An embedding model has one price (per 1M input tokens). Requiring a
+    full chat price sheet for it booked every indexing run — and every
+    RAG query — at zero cost, so the reports and the forecast never saw
+    the money the owner actually paid for teaching the bot."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from app.models import FxRate
+    from app.services.pricing import seed_default_prices
+
+    maker = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with maker() as db, db.begin():
+        db.add(FxRate(pair="USD/KZT", rate=Decimal(500), effective_from=datetime.now(UTC)))
+        await seed_default_prices(db, settings_rag)
+    body = "Аренда игрового зала стоит 26000 тенге в час. " * 40  # ~500 tokens
+    doc_id = await make_document(db_engine, title="Аренда", body=body)
+    provider = FakeEmbeddingProvider(dimensions=DIMENSIONS)
+    provider.model = settings_rag.openai_embedding_model  # the priced model
+
+    assert await process_pending_documents(maker, provider, settings_rag) == 1
+
+    async with maker() as db:
+        call = (
+            await db.execute(select(AiCall).where(AiCall.call_type == CallType.EMBEDDING))
+        ).scalar_one()
+    assert f"{doc_id}" in call.correlation_id
+    assert call.input_tokens > 100
+    # 0.02 $ per 1M tokens: a few hundred tokens is a few millionths.
+    assert call.cost_usd == (
+        Decimal(call.input_tokens) * Decimal("0.02") / Decimal(1_000_000)
+    ).quantize(Decimal("0.000001"))
+    assert call.cost_usd > 0
+    assert call.cost_kzt > 0
 
 
 async def test_spend_is_recorded_even_when_indexing_fails_after_paying(
@@ -288,19 +305,12 @@ async def test_spend_is_recorded_even_when_indexing_fails_after_paying(
     doc_id = await make_document(db_engine, title="Ломаный", body="Текст документа.")
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
 
-    assert (
-        await process_pending_documents(maker, WrongDimensionEmbeddings(), settings_rag)
-        == 1
-    )
+    assert await process_pending_documents(maker, WrongDimensionEmbeddings(), settings_rag) == 1
 
     async with maker() as db:
         document = await db.get(KbDocument, doc_id)
         calls = (
-            (
-                await db.execute(
-                    select(AiCall).where(AiCall.call_type == CallType.EMBEDDING)
-                )
-            )
+            (await db.execute(select(AiCall).where(AiCall.call_type == CallType.EMBEDDING)))
             .scalars()
             .all()
         )
@@ -317,15 +327,11 @@ async def _index_with(db_engine, settings_rag, provider, doc_id: int) -> None:
         await db.commit()
 
 
-async def test_search_returns_only_relevant_above_threshold(
-    db_engine, settings_rag
-) -> None:
+async def test_search_returns_only_relevant_above_threshold(db_engine, settings_rag) -> None:
     close_body = "Абонемент в тренажерный зал стоит 9000 тенге."
     far_body = "Гостиница: койко-место 8000 тенге в сутки."
     close_id = await make_document(db_engine, title="Абонементы", body=close_body)
-    far_id = await make_document(
-        db_engine, title="Гостиница", body=far_body, category="hotel"
-    )
+    far_id = await make_document(db_engine, title="Гостиница", body=far_body, category="hotel")
 
     query = "сколько стоит абонемент"
     provider = ScriptedEmbeddings(
@@ -364,9 +370,7 @@ async def test_ineligible_documents_never_reach_retrieval(
     provider = ScriptedEmbeddings({body: unit_vector(0.0), query: unit_vector(0.0)})
 
     doc_id = await make_document(db_engine, title="Документ", body=body)
-    await _index_with(
-        db_engine, settings_rag, provider, doc_id
-    )  # indexed while eligible
+    await _index_with(db_engine, settings_rag, provider, doc_id)  # indexed while eligible
 
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
@@ -414,15 +418,11 @@ async def test_category_filter(db_engine, settings_rag) -> None:
         }
     )
     gym = await make_document(db_engine, title="Зал", body=gym_body, category="gym")
-    hotel = await make_document(
-        db_engine, title="Отель", body=hotel_body, category="hotel"
-    )
+    hotel = await make_document(db_engine, title="Отель", body=hotel_body, category="hotel")
     await _index_with(db_engine, settings_rag, provider, gym)
     await _index_with(db_engine, settings_rag, provider, hotel)
 
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db:
-        hits = (
-            await search_chunks(db, provider, settings_rag, query, category="hotel")
-        ).hits
+        hits = (await search_chunks(db, provider, settings_rag, query, category="hotel")).hits
     assert [h.title for h in hits] == ["Отель"]

@@ -4,6 +4,7 @@ PY ?= .venv/bin/python
 
 .PHONY: up up-dev down build logs migrate revision test lint fmt \
         create-admin reset-admin-password kb-import seed-prices venv smoke \
+        eval eval-live load-test preflight \
         backup backup-verify
 
 up:
@@ -68,3 +69,28 @@ lint:
 
 fmt:
 	cd backend && ../.venv/bin/ruff check --fix app && ../.venv/bin/ruff format app
+
+# --- acceptance (phase 10) ---
+# Offline eval: fake providers, a scratch database next to the real one
+# (created, migrated, dropped). Costs nothing. Report -> reports/.
+eval:
+	mkdir -p reports
+	$(COMPOSE) run --rm -T backend python -m app.cli eval > reports/eval-offline.md
+	@echo "Отчёт: reports/eval-offline.md"
+
+# Live eval: real OpenAI against YOUR knowledge base and YOUR limits.
+# Asks for confirmation and prints the cost at the end.
+eval-live:
+	mkdir -p reports
+	$(COMPOSE) run --rm backend python -m app.cli eval --live --yes > reports/eval-live.md
+	@echo "Отчёт: reports/eval-live.md"
+
+# 5 and 30 parallel chats through the whole chain, DRY_RUN, scratch database.
+load-test:
+	mkdir -p reports
+	$(COMPOSE) run --rm -T backend python -m app.cli load-test > reports/load-test.md
+	@echo "Отчёт: reports/load-test.md"
+
+# Readiness checks (free). Add --with-provider by hand to also ask GREEN-API.
+preflight:
+	$(COMPOSE) run --rm -T backend python -m app.cli preflight

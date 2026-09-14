@@ -22,9 +22,8 @@ from app.models.enums import CallType, DocStatus
 from app.services.kb_text import chunk_text
 from app.services.pricing import (
     PricingError,
-    Usage,
-    compute_cost_usd,
-    load_price_sheet,
+    compute_embedding_cost_usd,
+    load_embedding_price_usd,
     load_usd_kzt_rate,
     usd_to_kzt,
 )
@@ -47,6 +46,11 @@ class IndexResult:
     chunks: int = 0
     embed_tokens: int = 0
     model: str = ""
+
+
+def embedding_input(title: str, piece: str) -> str:
+    """What is sent to the embedding model for one chunk."""
+    return f"{title.strip()}\n{piece}" if title.strip() else piece
 
 
 def is_indexable(document: KbDocument) -> bool:
@@ -106,8 +110,14 @@ async def index_document(
     vectors: list[list[float]] = []
     total_tokens = 0
     model = provider.model
-    for start in range(0, len(pieces), _EMBED_BATCH):
-        batch = pieces[start : start + _EMBED_BATCH]
+    # The TITLE is embedded together with each piece (but stored apart, in
+    # the chunk metadata and the <kb_chunk source=> tag). A section whose
+    # body is a bare name and phone number — «Тир и страйкбол» → «Георгий
+    # Викторович - +7 ...» — is otherwise unreachable by the very word a
+    # customer uses for it.
+    inputs = [embedding_input(document.title, piece) for piece in pieces]
+    for start in range(0, len(inputs), _EMBED_BATCH):
+        batch = inputs[start : start + _EMBED_BATCH]
         result = await provider.embed(batch)
         vectors.extend(result.vectors)
         total_tokens += result.total_tokens
@@ -253,8 +263,8 @@ async def _book_embeddings(
             cost_usd = Decimal(0)
             cost_kzt = Decimal(0)
             try:
-                prices = await load_price_sheet(db, report.model)
-                cost_usd = compute_cost_usd(prices, Usage(input_tokens=report.embed_tokens))
+                price = await load_embedding_price_usd(db, report.model)
+                cost_usd = compute_embedding_cost_usd(price, report.embed_tokens)
                 cost_kzt = usd_to_kzt(cost_usd, await load_usd_kzt_rate(db))
             except PricingError:
                 # No price for this embedding model yet: record the call

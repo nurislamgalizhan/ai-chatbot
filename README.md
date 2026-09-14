@@ -6,7 +6,8 @@ Production-система: AI-консультант в WhatsApp (GREEN-API) с 
 компания, вся специфика организации живёт в настройках и базе знаний.
 Первая инсталляция — СУЦ «Меркурий Медет» (Алматы, mmedet.kz).
 
-**Статус: ФАЗА 0 — проектирование. Кода ещё нет.**
+**Статус: фазы 0–10 реализованы, система в режиме приёмки (`DRY_RUN=true`).**
+Отчёты приёмки — [docs/acceptance.md](docs/acceptance.md).
 
 Источник истины по требованиям — [SPEC.md](SPEC.md). Правила работы для
 Claude Code — [CLAUDE.md](CLAUDE.md).
@@ -45,15 +46,25 @@ Vite + TanStack Query · Docker Compose · pytest.
 - **Три языка:** ru/kk/en; русский — источник истины, машинные черновики
   переводов никогда не отдаются клиенту без утверждения.
 
-## Быстрый старт (появится в ФАЗЕ 1)
+## Быстрый старт
 
 ```
 cp .env.example .env   # заполнить секреты, chmod 600
 make up                # поднять compose
 make migrate           # миграции
 make create-admin      # единственная учётная запись
-make test              # тесты
+make seed-prices       # стартовые цены моделей (сверить с сайтом OpenAI)
+make kb-import         # база знаний из экспорта (черновики)
+make preflight         # проверка готовности: что ещё не настроено
+make test              # тесты (нужен Docker: PostgreSQL поднимается сам)
 ```
+
+Приёмка (без ключей и без денег): `make eval` — прогон eval-набора на
+заглушках, `make load-test` — 5 и 30 параллельных чатов через всю
+цепочку. Оба создают временную базу рядом с рабочей и удаляют её.
+`make eval-live` — тот же набор на реальной модели против вашей базы
+знаний; стоит денег, спрашивает подтверждение, показывает стоимость.
+Отчёты появляются в `reports/`.
 
 `DRY_RUN=true` (дефолт): система принимает и обрабатывает сообщения, но не
 отправляет ответы в WhatsApp — обязательный режим приёмки.
@@ -80,11 +91,12 @@ make test              # тесты
 
 ## Переменные окружения
 
-Полный список — `.env.example` (появится в ФАЗЕ 1). Основные группы:
-секреты (OPENAI_API_KEY, GREEN_API_ID_INSTANCE, GREEN_API_TOKEN,
-SESSION_SECRET, ENCRYPTION_KEY), модели (OPENAI_CHAT_MODEL,
-OPENAI_TRANSCRIBE_MODEL, OPENAI_EMBEDDING_MODEL, OPENAI_REASONING_EFFORT),
-лимиты (SPEC §9.3), режимы (DRY_RUN, COMPOSE_PROJECT_NAME).
+Полный список — `.env.example` (тест `tests/unit/test_env_example.py`
+следит, чтобы файл и настройки не расходились). Основные группы: секреты
+(OPENAI_API_KEY, GREEN_API_ID_INSTANCE, GREEN_API_TOKEN, ENCRYPTION_KEY),
+модели (OPENAI_CHAT_MODEL, OPENAI_TRANSCRIBE_MODEL, OPENAI_EMBEDDING_MODEL),
+режимы (APP_ENV, DRY_RUN, COMPOSE_PROJECT_NAME). Лимиты и пороги (SPEC §9.3)
+живут в таблице настроек и правятся в разделе «Лимиты».
 
 ## Лицензия
 

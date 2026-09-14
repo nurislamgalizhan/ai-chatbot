@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TransportStatus(BaseModel):
@@ -142,6 +142,8 @@ class LoginHistoryResponse(BaseModel):
 
 class ConfirmPasswordRequest(BaseModel):
     """Re-authentication for an action that outlives the session."""
+
+    model_config = ConfigDict(extra="forbid")
 
     current_password: str = Field(min_length=1, max_length=200)
 

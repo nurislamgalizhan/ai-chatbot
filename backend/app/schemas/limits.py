@@ -6,11 +6,15 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class LimitsSettings(BaseModel):
     """SPEC §9.3 knobs, validated ranges. All money fields are ₸."""
+
+    # Doubles as the request body of PUT /api/limits: a `spent_usd` or
+    # `password_hash` smuggled in here is rejected, not dropped.
+    model_config = ConfigDict(extra="forbid")
 
     max_input_tokens: int = Field(ge=1_000, le=50_000)
     max_output_tokens: int = Field(ge=50, le=2_000)
@@ -91,14 +95,20 @@ class LimitsResponse(BaseModel):
 
 
 class LimitsUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     settings: LimitsSettings
 
 
 class FxRateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     rate: Decimal = Field(gt=0, le=100_000)
 
 
 class PriceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     model: str = Field(min_length=1, max_length=100)
     unit: str = Field(pattern="^(per_1m_input|per_1m_cached_input|per_1m_output|per_minute_audio)$")
     price_usd: Decimal = Field(ge=0, le=1_000)

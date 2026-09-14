@@ -6,7 +6,7 @@ import logging
 import re
 import uuid
 from collections.abc import MutableMapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 import structlog
 import structlog.tracebacks
@@ -39,10 +39,17 @@ def _redact(_: object, __: str, event_dict: MutableMapping[str, Any]) -> Mutable
     return event_dict
 
 
-def configure_logging(settings: Settings) -> None:
+def configure_logging(settings: Settings, *, stream: TextIO | None = None) -> None:
+    """Structured JSON logging.
+
+    `stream` redirects structlog's output (default: stdout). The CLI
+    reports (eval, load test, preflight) print their result to stdout,
+    so they send the logs to stderr instead of mixing the two.
+    """
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
-    logging.basicConfig(level=level, format="%(message)s")
+    logging.basicConfig(level=level, format="%(message)s", stream=stream)
     structlog.configure(
+        logger_factory=structlog.PrintLoggerFactory(file=stream),
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,

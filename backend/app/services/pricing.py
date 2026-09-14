@@ -85,6 +85,39 @@ async def load_price_sheet(db: AsyncSession, model: str, at: datetime | None = N
     )
 
 
+async def load_embedding_price_usd(
+    db: AsyncSession, model: str, at: datetime | None = None
+) -> Decimal:
+    """USD per 1M INPUT tokens for an embedding model.
+
+    An embedding model has no cached-input or output price, so asking
+    `load_price_sheet` for it always failed — and every RAG query and
+    every indexing run was then booked at zero cost. Fails closed like
+    the other loaders when even the input price is missing.
+    """
+    moment = at or datetime.now(UTC)
+    price = (
+        await db.execute(
+            select(ModelPrice.price_usd)
+            .where(
+                ModelPrice.model == model,
+                ModelPrice.unit == PriceUnit.PER_1M_INPUT,
+                ModelPrice.effective_from <= moment,
+            )
+            .order_by(ModelPrice.effective_from.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if price is None:
+        msg = f"no per-1M-input price for embedding model {model!r} (set it in Лимиты)"
+        raise PricingError(msg)
+    return price
+
+
+def compute_embedding_cost_usd(price_per_1m: Decimal, tokens: int) -> Decimal:
+    return (Decimal(tokens) * price_per_1m / _MILLION).quantize(Decimal("0.000001"))
+
+
 async def load_audio_price_usd(db: AsyncSession, model: str, at: datetime | None = None) -> Decimal:
     """USD per MINUTE of audio for the transcription model.
 

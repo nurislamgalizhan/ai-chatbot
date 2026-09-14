@@ -39,7 +39,9 @@ from app.services.pricing import (
     PricingError,
     Usage,
     compute_cost_usd,
+    compute_embedding_cost_usd,
     estimate_max_cost_usd,
+    load_embedding_price_usd,
     load_price_sheet,
     load_usd_kzt_rate,
     usd_to_kzt,
@@ -547,10 +549,8 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
                     db, deps.embedding_provider, deps.settings, inp.question
                 )
                 try:
-                    embed_prices = await load_price_sheet(db, search.embed_model)
-                    embed_cost = compute_cost_usd(
-                        embed_prices, Usage(input_tokens=search.embed_tokens)
-                    )
+                    embed_price = await load_embedding_price_usd(db, search.embed_model)
+                    embed_cost = compute_embedding_cost_usd(embed_price, search.embed_tokens)
                 except PricingError:
                     # Embedding accounting degrades to zero-cost rows, but
                     # the call itself is still visible; the model spend
@@ -616,6 +616,7 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
                 history=inp.history,
                 question=inp.question,
                 max_input_tokens=max_input_tokens,
+                language=inp.language,
             )
         )
         request = ChatRequest(

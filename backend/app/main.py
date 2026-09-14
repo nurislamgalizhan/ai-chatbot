@@ -79,9 +79,13 @@ def create_app(
     redis: Redis | None = None,
     embedding_provider: object | None = None,
     chat_provider: object | None = None,
+    configure_logs: bool = True,
 ) -> FastAPI:
+    """`configure_logs=False` is for a host process (the load test) that
+    already routes its logs elsewhere and prints a report to stdout."""
     settings = settings or get_settings()
-    configure_logging(settings)
+    if configure_logs:
+        configure_logging(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
