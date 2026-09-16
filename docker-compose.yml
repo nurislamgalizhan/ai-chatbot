@@ -2,6 +2,9 @@
 # reached only through the host's existing gateway attached to `edge`.
 name: ${COMPOSE_PROJECT_NAME:-wabot}
 
+# Applied AFTER env_file, so these WIN over the same names in .env: the
+# in-network addresses must not be replaced by the host-side ones that
+# .env carries for local tooling (alembic from a laptop).
 x-app-env: &app-env
   APP_ENV: ${APP_ENV:-prod}
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -91,6 +94,13 @@ services:
 
   backend:
     build: ./backend
+    # Everything secret or optional lives ONLY in .env and reaches the
+    # process through here: OPENAI_API_KEY, GREEN_API_ID_INSTANCE,
+    # GREEN_API_TOKEN, model and media overrides. Enumerating them above
+    # instead would not work — an unset variable substitutes to an EMPTY
+    # STRING, which overrides the application default with "" rather than
+    # leaving it alone.
+    env_file: [.env]
     environment: *app-env
     networks: [internal]
     restart: unless-stopped
@@ -125,6 +135,9 @@ services:
 
   worker:
     build: ./backend
+    # Same as backend: the worker is the process that actually calls
+    # OpenAI and GREEN-API, so without this it had no key at all.
+    env_file: [.env]
     command: ["python", "-m", "app.worker.main"]
     # The GREEN-API long-poll blocks for up to ~35 s; the default 10 s
     # grace period would SIGKILL the worker mid-send on every deploy,
