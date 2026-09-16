@@ -12,12 +12,13 @@ The rules that must never bend:
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.models import KbFaq, KbFaqMiss
 from app.models.enums import AnswerStatus, KbLanguage
 from app.services.kb_faq import approved_answer, build_pattern, match_faq
 from app.services.kb_text import detect_language
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 RU_ANSWER = "Адрес: г. Алматы, ул. Коперника 130."
 KK_ANSWER = "Мекенжайы: Алматы қаласы, Коперник көшесі 130."
@@ -82,9 +83,7 @@ async def test_kazakh_question_without_approved_kk_falls_through_and_records_mis
 async def test_machine_draft_is_never_delivered(db_engine) -> None:
     """A machine translation exists in the row but must stay invisible to
     customers — only the admin review screen may show it."""
-    await seed_faq(
-        db_engine, kk_status=AnswerStatus.MACHINE, kk_answer="Машинный черновик"
-    )
+    await seed_faq(db_engine, kk_status=AnswerStatus.MACHINE, kk_answer="Машинный черновик")
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db:
         hit = await match_faq(db, "Мекенжайыңыз қандай?", KbLanguage.KK)
@@ -119,9 +118,7 @@ async def test_unrelated_question_is_not_a_language_miss(db_engine) -> None:
     await seed_faq(db_engine)
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db:
-        hit = await match_faq(
-            db, "Сколько стоит аренда поля на два часа?", KbLanguage.RU
-        )
+        hit = await match_faq(db, "Сколько стоит аренда поля на два часа?", KbLanguage.RU)
         await db.commit()
         misses = (await db.execute(select(KbFaqMiss))).scalars().all()
     assert hit is None
@@ -132,9 +129,7 @@ async def test_word_order_and_politeness_still_match(db_engine) -> None:
     await seed_faq(db_engine)
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db:
-        hit = await match_faq(
-            db, "Здравствуйте! Подскажите, адрес какой?", KbLanguage.RU
-        )
+        hit = await match_faq(db, "Здравствуйте! Подскажите, адрес какой?", KbLanguage.RU)
     assert hit is not None
 
 

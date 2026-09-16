@@ -19,14 +19,27 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6379/9")
 os.environ.setdefault("ENCRYPTION_KEY", Fernet.generate_key().decode())
 os.environ.setdefault("CORS_ORIGINS", "")
 
+# THE TEST SUITE MUST NOT BE ABLE TO SPEND MONEY. `Settings` reads the
+# repo-root `.env` (env_file), so the moment a real OPENAI_API_KEY was
+# put there, `create_app` started building REAL providers and endpoints
+# like the sandbox would have called OpenAI for real. Environment
+# variables outrank the file, so blanking them here cuts that off — a
+# hard assignment, not setdefault: an exported key must not leak in
+# either. Live runs go through `python -m app.cli eval --live`, never
+# through pytest. Guarded by tests/unit/test_no_paid_calls_in_tests.py.
+os.environ["OPENAI_API_KEY"] = ""
+os.environ["GREEN_API_ID_INSTANCE"] = ""
+os.environ["GREEN_API_TOKEN"] = ""
+
 import httpx
-from app.config import Settings, get_settings
-from app.main import create_app
-from app.services.admin_setup import CreatedAdmin, create_admin
 from asgi_lifespan import LifespanManager
 from fakeredis.aioredis import FakeRedis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.config import Settings, get_settings
+from app.main import create_app
+from app.services.admin_setup import CreatedAdmin, create_admin
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -106,8 +119,9 @@ def migrated_db(database_url: str) -> str:
     os.environ["DATABASE_URL"] = database_url
     get_settings.cache_clear()
 
-    from alembic import command
     from alembic.config import Config
+
+    from alembic import command
 
     cfg = Config(str(BACKEND_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
@@ -130,9 +144,7 @@ def settings(migrated_db: str) -> Settings:
 async def clean_db(migrated_db: str) -> AsyncIterator[str]:
     engine = create_async_engine(migrated_db)
     async with engine.begin() as conn:
-        await conn.execute(
-            text(f"TRUNCATE {', '.join(APP_TABLES)} RESTART IDENTITY CASCADE")
-        )
+        await conn.execute(text(f"TRUNCATE {', '.join(APP_TABLES)} RESTART IDENTITY CASCADE"))
     await engine.dispose()
     yield migrated_db
 
@@ -150,9 +162,7 @@ def redis() -> FakeRedis:
 
 
 @pytest.fixture
-async def app(
-    settings: Settings, clean_db: str, redis: FakeRedis
-) -> AsyncIterator[FastAPI]:
+async def app(settings: Settings, clean_db: str, redis: FakeRedis) -> AsyncIterator[FastAPI]:
     application = create_app(settings, redis=redis)
     async with LifespanManager(application):
         yield application
@@ -161,16 +171,12 @@ async def app(
 @pytest.fixture
 async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://testserver"
-    ) as http_client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
         yield http_client
 
 
 @pytest.fixture
-def admin_factory(
-    clean_db: str, settings: Settings
-) -> Callable[..., Awaitable[CreatedAdmin]]:
+def admin_factory(clean_db: str, settings: Settings) -> Callable[..., Awaitable[CreatedAdmin]]:
     async def _create(
         phone: str = TEST_PHONE,
         password: str = TEST_PASSWORD,
@@ -210,9 +216,7 @@ async def login(
     offset_steps: int = 0,
 ) -> str:
     """Full login flow; returns the CSRF token for mutating requests."""
-    step1 = await client.post(
-        "/api/auth/login", json={"phone": admin.phone, "password": password}
-    )
+    step1 = await client.post("/api/auth/login", json={"phone": admin.phone, "password": password})
     assert step1.status_code == 200, step1.text
     step2 = await client.post(
         "/api/auth/verify-totp",

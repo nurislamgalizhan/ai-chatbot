@@ -17,6 +17,7 @@ Two modes share one code path:
 from __future__ import annotations
 
 import json
+import re
 import statistics
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -41,6 +42,18 @@ if TYPE_CHECKING:
     from app.services.generation import GenerationDeps
 
 CASES_PATH = Path(__file__).with_name("cases.json")
+
+#: A thousands separator between digits: «9 000 тенге», «9,000 tenge»,
+#: «26 000 тенге/час». The criteria are written as bare prices (9000),
+#: and a real model formats them for humans — the FIRST live run failed
+#: twelve correct answers on this alone.
+_THOUSANDS_SEPARATOR = re.compile(r"(?<=\d)[\s\u00a0\u2007\u2009\u202f,](?=\d{3}(?!\d))")
+
+
+def same_numbers(text: str) -> str:
+    """Compare prices by value, not by formatting."""
+    return _THOUSANDS_SEPARATOR.sub("", text)
+
 
 Mode = Literal["offline", "live"]
 Category = Literal[
@@ -369,13 +382,13 @@ def _judge(expect: Expect, observed: Observation) -> list[str]:  # noqa: PLR0912
         failures.append(
             f"язык ответа `{observed.answer_language}`, ожидался `{expect.answer_language}`"
         )
-    text = observed.text or ""
+    text = same_numbers(observed.text or "")
     if expect.must_contain_any and not any(
-        fragment in text for fragment in expect.must_contain_any
+        same_numbers(fragment) in text for fragment in expect.must_contain_any
     ):
         failures.append(f"в ответе нет ни одного из фрагментов {expect.must_contain_any}")
     for fragment in (*expect.must_not_contain, *NEVER_IN_ANSWER):
-        if fragment and fragment in text:
+        if fragment and same_numbers(fragment) in text:
             failures.append(f"в ответе есть запрещённый фрагмент «{fragment[:40]}»")
     if expect.handoff is not None and observed.handoff != expect.handoff:
         failures.append(f"передача менеджеру = {observed.handoff}, ожидалось {expect.handoff}")

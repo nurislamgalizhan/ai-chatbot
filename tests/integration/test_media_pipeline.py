@@ -84,9 +84,7 @@ class FakeDownloadProvider(WhatsAppProvider):
         if self.error is not None:
             raise self.error
         if len(self.payload) > max_bytes:
-            raise ProviderError(
-                "downloadFile.too_large", status_code=None, retryable=False
-            )
+            raise ProviderError("downloadFile.too_large", status_code=None, retryable=False)
         return self.payload
 
     async def poll_notification(self):  # pragma: no cover - unused
@@ -106,9 +104,7 @@ class FakeDownloadProvider(WhatsAppProvider):
     ):  # pragma: no cover
         raise NotImplementedError
 
-    async def send_file(
-        self, chat_id, file_path, file_name, caption=None
-    ):  # pragma: no cover
+    async def send_file(self, chat_id, file_path, file_name, caption=None):  # pragma: no cover
         raise NotImplementedError
 
     async def get_instance_state(self) -> str:  # pragma: no cover
@@ -139,18 +135,14 @@ async def media_env(db_engine, settings, instance_pk, tmp_path):
 
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
-        db.add(
-            FxRate(pair="USD/KZT", rate=Decimal(500), effective_from=datetime.now(UTC))
-        )
+        db.add(FxRate(pair="USD/KZT", rate=Decimal(500), effective_from=datetime.now(UTC)))
         await seed_default_prices(db, settings)
         # Vision is off by default (PII policy); the image tests turn it on.
         await set_setting(db, app_settings.VISION_ENABLED, True)
 
     media_settings = settings.model_copy(update={"media_dir": str(tmp_path)})
     transcription = FakeTranscriptionProvider(
-        script=[
-            TranscriptionResult(text=TRANSCRIPT, model="gpt-transcribe", latency_ms=120)
-        ]
+        script=[TranscriptionResult(text=TRANSCRIPT, model="gpt-transcribe", latency_ms=120)]
     )
     chat_provider = FakeChatProvider(
         script=[make_result(SERVICE, input_tokens=200) for _ in range(4)],
@@ -178,9 +170,7 @@ async def media_env(db_engine, settings, instance_pk, tmp_path):
     }
 
 
-async def make_chat(
-    maker, instance_pk: int, *, mode: ChatMode = ChatMode.AUTO_AI
-) -> int:
+async def make_chat(maker, instance_pk: int, *, mode: ChatMode = ChatMode.AUTO_AI) -> int:
     async with maker() as db, db.begin():
         chat = Chat(
             instance_id=instance_pk,
@@ -229,9 +219,7 @@ async def add_media_message(
 
 async def get_message(maker, message_id: int) -> Message:
     async with maker() as db:
-        return (
-            await db.execute(select(Message).where(Message.id == message_id))
-        ).scalar_one()
+        return (await db.execute(select(Message).where(Message.id == message_id))).scalar_one()
 
 
 async def get_job(maker, message_id: int) -> MediaJob:
@@ -470,9 +458,7 @@ async def test_image_limit_per_dialog_stops_a_photo_flood(media_env) -> None:
     message = await get_message(maker, second)
     assert message.state is MsgState.HANDED_TO_HUMAN
     assert message.error_code == "image_limit_reached"
-    assert (
-        len(media_env["chat_provider"].vision_requests) == 1
-    )  # only the first was paid
+    assert len(media_env["chat_provider"].vision_requests) == 1  # only the first was paid
 
 
 # ------------------------------ money safety ----------------------------
@@ -500,9 +486,7 @@ async def test_same_file_is_never_paid_for_twice(media_env) -> None:
         job.state = MediaJobState.PENDING
         job.lease_until = None
     media_env["transcription"].script = [
-        TranscriptionResult(
-            text="повторная оплата", model="gpt-transcribe", latency_ms=1
-        )
+        TranscriptionResult(text="повторная оплата", model="gpt-transcribe", latency_ms=1)
     ]
 
     await media_env["processor"].run_once()
@@ -537,9 +521,7 @@ async def test_failed_transcription_releases_the_reservation_and_retries(
     media_env,
 ) -> None:
     maker = media_env["maker"]
-    media_env["transcription"].script = [
-        ChatError("transcription_failed:503", retryable=True)
-    ]
+    media_env["transcription"].script = [ChatError("transcription_failed:503", retryable=True)]
     chat_id = await make_chat(maker, media_env["instance_pk"])
     message_id = await add_media_message(maker, chat_id)
 
@@ -718,18 +700,14 @@ async def test_provider_duration_longer_than_the_header_is_what_is_billed(media_
 
 async def test_retries_are_bounded_and_end_with_a_human(media_env) -> None:
     maker = media_env["maker"]
-    media_env["download"].error = ProviderError(
-        "downloadFile", status_code=None, retryable=True
-    )
+    media_env["download"].error = ProviderError("downloadFile", status_code=None, retryable=True)
     chat_id = await make_chat(maker, media_env["instance_pk"])
     message_id = await add_media_message(maker, chat_id)
 
     for _ in range(5):
         async with maker() as db, db.begin():
             job = (
-                await db.execute(
-                    select(MediaJob).where(MediaJob.message_id == message_id)
-                )
+                await db.execute(select(MediaJob).where(MediaJob.message_id == message_id))
             ).scalar_one()
             job.next_attempt_at = None  # skip the backoff wait
             job.lease_until = None
@@ -812,11 +790,7 @@ async def test_enqueue_is_idempotent_per_message(media_env) -> None:
         )
     async with maker() as db:
         jobs = (
-            (
-                await db.execute(
-                    select(MediaJob).where(MediaJob.message_id == message_id)
-                )
-            )
+            (await db.execute(select(MediaJob).where(MediaJob.message_id == message_id)))
             .scalars()
             .all()
         )
@@ -834,11 +808,7 @@ async def test_documents_get_no_job_at_all(media_env) -> None:
 
     async with maker() as db:
         jobs = (
-            (
-                await db.execute(
-                    select(MediaJob).where(MediaJob.message_id == message_id)
-                )
-            )
+            (await db.execute(select(MediaJob).where(MediaJob.message_id == message_id)))
             .scalars()
             .all()
         )
@@ -906,9 +876,7 @@ async def test_failure_after_the_outcome_is_committed_never_freezes_the_chat(
                 await db.execute(
                     select(MediaJob).where(
                         MediaJob.chat_id == chat_id,
-                        MediaJob.state.in_(
-                            (MediaJobState.PENDING, MediaJobState.PROCESSING)
-                        ),
+                        MediaJob.state.in_((MediaJobState.PENDING, MediaJobState.PROCESSING)),
                     )
                 )
             )
@@ -952,9 +920,7 @@ async def test_refusal_reaches_the_customer_before_the_chat_is_released(
     async def spy(job, reason):
         async with maker() as db:
             row = (
-                await db.execute(
-                    select(MediaJob).where(MediaJob.message_id == message_id)
-                )
+                await db.execute(select(MediaJob).where(MediaJob.message_id == message_id))
             ).scalar_one()
             seen_state.append(row.state)
         await original(job, reason)

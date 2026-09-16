@@ -11,6 +11,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from fakeredis.aioredis import FakeRedis
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.ai.chat_provider import ChatError, ChatUsage, FakeChatProvider, make_result
 from app.models import (
     AiCall,
@@ -48,10 +52,6 @@ from app.services.kb_faq import build_pattern
 from app.services.kb_indexing import index_document
 from app.services.pricing import seed_default_prices
 from app.worker.pipeline import AiPipeline, reply_outbound_id
-from fakeredis.aioredis import FakeRedis
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
 from tests.integration.test_kb_rag import ScriptedEmbeddings, unit_vector
 
 QUESTION = "сколько стоит абонемент в зал"
@@ -89,9 +89,7 @@ async def env(db_engine, settings, instance_pk):
 
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
-        db.add(
-            FxRate(pair="USD/KZT", rate=Decimal(500), effective_from=datetime.now(UTC))
-        )
+        db.add(FxRate(pair="USD/KZT", rate=Decimal(500), effective_from=datetime.now(UTC)))
         await seed_default_prices(db, settings)
         await set_setting(db, app_settings.DEBOUNCE_SECONDS, 0)
         instruction = await create_version(
@@ -105,9 +103,7 @@ async def env(db_engine, settings, instance_pk):
         )
         await activate_version(db, instruction, actor_user_id=None)
 
-    embeddings = PricedScriptedEmbeddings(
-        {QUESTION: unit_vector(0.0), DOC_BODY: unit_vector(0.05)}
-    )
+    embeddings = PricedScriptedEmbeddings({QUESTION: unit_vector(0.0), DOC_BODY: unit_vector(0.05)})
     async with maker() as db, db.begin():
         document = KbDocument(
             title="Абонементы",
@@ -194,9 +190,7 @@ async def add_queued(
 
 async def get_message(maker: async_sessionmaker, message_id: int) -> Message:
     async with maker() as db:
-        return (
-            await db.execute(select(Message).where(Message.id == message_id))
-        ).scalar_one()
+        return (await db.execute(select(Message).where(Message.id == message_id))).scalar_one()
 
 
 async def get_reply(maker: async_sessionmaker, chat_id: int) -> Message | None:
@@ -237,9 +231,7 @@ async def test_happy_path_full_bookkeeping(env) -> None:
     async with maker() as db:
         outbox = (
             await db.execute(
-                select(WaOutbox).where(
-                    WaOutbox.outbound_message_id == reply.outbound_message_id
-                )
+                select(WaOutbox).where(WaOutbox.outbound_message_id == reply.outbound_message_id)
             )
         ).scalar_one()
         chat = await db.get(Chat, chat_id)
@@ -272,9 +264,7 @@ async def test_happy_path_full_bookkeeping(env) -> None:
 async def test_debounce_merges_batch_into_one_call(env) -> None:
     maker = env["maker"]
     # The merged question is what gets embedded — script its vector too.
-    env["deps"].embedding_provider.mapping[f"Здравствуйте!\n{QUESTION}"] = unit_vector(
-        0.0
-    )
+    env["deps"].embedding_provider.mapping[f"Здравствуйте!\n{QUESTION}"] = unit_vector(0.0)
     chat_id = await make_chat(maker, env["instance_pk"])
     first = await add_queued(maker, chat_id, "Здравствуйте!")
     second = await add_queued(maker, chat_id, QUESTION)
@@ -348,9 +338,7 @@ async def test_stale_by_client_send_time_after_worker_outage(env) -> None:
     or the bot would answer hours-old messages after every outage."""
     maker = env["maker"]
     chat_id = await make_chat(maker, env["instance_pk"])
-    old_id = await add_queued(
-        maker, chat_id, "вопрос до сбоя", age_minutes=0, sent_age_minutes=180
-    )
+    old_id = await add_queued(maker, chat_id, "вопрос до сбоя", age_minutes=0, sent_age_minutes=180)
     fresh_id = await add_queued(maker, chat_id, QUESTION, sent_age_minutes=5)
 
     await env["pipeline"].run_once()
@@ -401,9 +389,7 @@ async def test_media_gets_free_acknowledgement_reply(env) -> None:
         chat = await db.get(Chat, chat_id)
         outbox = (
             await db.execute(
-                select(WaOutbox).where(
-                    WaOutbox.outbound_message_id == reply.outbound_message_id
-                )
+                select(WaOutbox).where(WaOutbox.outbound_message_id == reply.outbound_message_id)
             )
         ).scalar_one()
         calls = (await db.execute(select(AiCall))).scalars().all()
@@ -432,9 +418,7 @@ async def test_media_acknowledgement_is_written_in_the_client_language(env) -> N
     reply = await get_reply(maker, chat_id)
     assert reply is not None
     assert reply.body == kk_reply
-    asked = " ".join(
-        str(m.get("content", "")) for m in env["chat_provider"].requests[0].messages
-    )
+    asked = " ".join(str(m.get("content", "")) for m in env["chat_provider"].requests[0].messages)
     assert "Язык ответа: kk" in asked
 
 
@@ -540,9 +524,7 @@ async def test_injection_is_refused_without_forwarding_the_attack(env) -> None:
     # Exactly one call — to write the refusal, not to answer the attack.
     assert len(env["chat_provider"].requests) == 1
     sent = env["chat_provider"].requests[0]
-    everything = sent.system + " ".join(
-        str(m.get("content", "")) for m in sent.messages
-    )
+    everything = sent.system + " ".join(str(m.get("content", "")) for m in sent.messages)
     assert attack not in everything
     assert "Игнорируй" not in everything
 
@@ -564,9 +546,7 @@ async def test_no_rag_data_hands_off_without_answering(env) -> None:
     # One call to phrase the handoff; the customer's question was never
     # sent for an answer.
     assert len(env["chat_provider"].requests) == 1
-    asked = " ".join(
-        str(m.get("content", "")) for m in env["chat_provider"].requests[0].messages
-    )
+    asked = " ".join(str(m.get("content", "")) for m in env["chat_provider"].requests[0].messages)
     assert "корпоративы" not in asked
     assert (await get_message(maker, msg_id)).state is MsgState.ANSWERED
     async with maker() as db:
@@ -645,9 +625,7 @@ async def test_retryable_error_requeues_then_succeeds(env) -> None:
             )
         ).scalar_one()
         error_calls = (
-            (await db.execute(select(AiCall).where(AiCall.status == "error")))
-            .scalars()
-            .all()
+            (await db.execute(select(AiCall).where(AiCall.status == "error"))).scalars().all()
         )
     assert day.reserved_usd == 0
     assert day.spent_usd == Decimal("0.00026000")  # booked once, not twice
@@ -697,9 +675,7 @@ async def test_circuit_breaker_opens_and_holds_messages(env) -> None:
         events = (
             (
                 await db.execute(
-                    select(SystemEvent).where(
-                        SystemEvent.event == "circuit_breaker_opened"
-                    )
+                    select(SystemEvent).where(SystemEvent.event == "circuit_breaker_opened")
                 )
             )
             .scalars()
@@ -725,11 +701,7 @@ async def test_not_configured_is_an_honest_slow_requeue(env) -> None:
     assert message.next_attempt_at > datetime.now(UTC)
     async with maker() as db:
         events = (
-            (
-                await db.execute(
-                    select(SystemEvent).where(SystemEvent.event == "ai_not_configured")
-                )
-            )
+            (await db.execute(select(SystemEvent).where(SystemEvent.event == "ai_not_configured")))
             .scalars()
             .all()
         )
@@ -807,9 +779,7 @@ async def test_sweeper_finishes_orphan_with_existing_reply(env) -> None:
         message = await db.get(Message, msg_id)
         message.state = MsgState.PROCESSING
         message.correlation_id = correlation
-        message.next_attempt_at = datetime.now(UTC) - timedelta(
-            minutes=1
-        )  # lease expired
+        message.next_attempt_at = datetime.now(UTC) - timedelta(minutes=1)  # lease expired
         db.add(
             Message(
                 chat_id=chat_id,
@@ -994,9 +964,7 @@ async def test_chat_waiting_on_media_is_not_answered_out_of_order(env) -> None:
             await db.execute(select(MediaJob).where(MediaJob.message_id == voice_id))
         ).scalar_one()
         job.state = MediaJobState.DONE
-    env["deps"].embedding_provider.mapping[f"Здравствуйте\n{QUESTION}"] = unit_vector(
-        0.0
-    )
+    env["deps"].embedding_provider.mapping[f"Здравствуйте\n{QUESTION}"] = unit_vector(0.0)
 
     assert await env["pipeline"].run_once() == 1
     assert len(env["chat_provider"].requests) == 1

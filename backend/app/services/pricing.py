@@ -115,7 +115,11 @@ async def load_embedding_price_usd(
 
 
 def compute_embedding_cost_usd(price_per_1m: Decimal, tokens: int) -> Decimal:
-    return (Decimal(tokens) * price_per_1m / _MILLION).quantize(Decimal("0.000001"))
+    """Eight decimals, like `compute_cost_usd` and the column that stores
+    it. Six rounded one RAG query (about 20 tokens at $0.02/1M, so
+    $0.0000004) down to zero, and a month of queries vanished from the
+    reports a fraction of a cent at a time."""
+    return (Decimal(tokens) * price_per_1m / _MILLION).quantize(_USD_PLACES)
 
 
 async def load_audio_price_usd(db: AsyncSession, model: str, at: datetime | None = None) -> Decimal:

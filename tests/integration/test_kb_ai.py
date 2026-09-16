@@ -13,16 +13,16 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from asgi_lifespan import LifespanManager
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.ai.chat_provider import ChatError, FakeChatProvider, make_result
 from app.main import create_app
 from app.models import AiCall, BudgetLedger, FxRate, KbFaq, KbFaqPattern
 from app.models.enums import BudgetScope, KbLanguage
 from app.services.kb_faq import build_pattern
 from app.services.pricing import seed_default_prices
-from asgi_lifespan import LifespanManager
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
 from tests.conftest import login
 
 FAQ_PAYLOAD = {
@@ -46,17 +46,13 @@ async def ai_client(settings, clean_db, redis, admin_factory, chat_provider, db_
     prices and an exchange rate so the paid path is real."""
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
-        db.add(
-            FxRate(pair="USD/KZT", rate=Decimal(500), effective_from=datetime.now(UTC))
-        )
+        db.add(FxRate(pair="USD/KZT", rate=Decimal(500), effective_from=datetime.now(UTC)))
         await seed_default_prices(db, settings)
 
     application = create_app(settings, redis=redis, chat_provider=chat_provider)
     async with LifespanManager(application):
         transport = httpx.ASGITransport(app=application)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
             admin = await admin_factory()
             csrf = await login(c, settings, admin)
             yield c, {"X-CSRF-Token": csrf}
@@ -78,9 +74,7 @@ async def test_translation_lands_as_a_draft_the_client_cannot_get(
     but the machine text still needs their approval before any client
     sees it (owner language policy)."""
     client, headers = ai_client
-    chat_provider.script = [
-        make_result(KK_TRANSLATION, input_tokens=300, output_tokens=60)
-    ]
+    chat_provider.script = [make_result(KK_TRANSLATION, input_tokens=300, output_tokens=60)]
     faq = await make_faq(client, headers)
 
     response = await client.post(
@@ -112,9 +106,7 @@ async def test_translation_lands_as_a_draft_the_client_cannot_get(
     assert day.reserved_usd == 0  # settled, nothing leaked
 
 
-async def test_owner_approval_is_still_one_entry_at_a_time(
-    ai_client, chat_provider
-) -> None:
+async def test_owner_approval_is_still_one_entry_at_a_time(ai_client, chat_provider) -> None:
     client, headers = ai_client
     chat_provider.script = [make_result(KK_TRANSLATION)]
     faq = await make_faq(client, headers)
@@ -143,9 +135,7 @@ async def test_russian_is_never_machine_written(ai_client) -> None:
     assert response.status_code == 422
 
 
-async def test_translation_without_a_source_is_refused(
-    ai_client, chat_provider
-) -> None:
+async def test_translation_without_a_source_is_refused(ai_client, chat_provider) -> None:
     client, headers = ai_client
     faq = await make_faq(client, headers)
     await client.patch(
@@ -277,17 +267,13 @@ async def test_a_phrase_owned_by_another_entry_is_never_stolen(
     async with maker() as db:
         owner_id = (
             await db.execute(
-                select(KbFaqPattern.faq_id).where(
-                    KbFaqPattern.pattern == "график работы"
-                )
+                select(KbFaqPattern.faq_id).where(KbFaqPattern.pattern == "график работы")
             )
         ).scalar_one()
     assert owner_id == other.json()["id"]  # still answers the other entry
 
 
-async def test_suggestions_in_kazakh_are_stored_for_that_language(
-    ai_client, chat_provider
-) -> None:
+async def test_suggestions_in_kazakh_are_stored_for_that_language(ai_client, chat_provider) -> None:
     client, headers = ai_client
     chat_provider.script = [make_result("қайда орналасқансыздар\nмекенжай қандай\n")]
     faq = await make_faq(client, headers)
@@ -318,11 +304,7 @@ async def test_entry_can_be_deleted_with_its_phrases(ai_client, db_engine) -> No
     async with maker() as db:
         assert await db.get(KbFaq, faq["id"]) is None
         left = (
-            (
-                await db.execute(
-                    select(KbFaqPattern).where(KbFaqPattern.faq_id == faq["id"])
-                )
-            )
+            (await db.execute(select(KbFaqPattern).where(KbFaqPattern.faq_id == faq["id"])))
             .scalars()
             .all()
         )
@@ -337,9 +319,7 @@ async def test_pattern_helper_still_owns_normalization(db_engine) -> None:
     assert pattern.token_key == sorted({"адрес"})
 
 
-async def test_second_click_is_not_free_for_the_budget(
-    ai_client, chat_provider, db_engine
-) -> None:
+async def test_second_click_is_not_free_for_the_budget(ai_client, chat_provider, db_engine) -> None:
     """Every click is a separate paid action, not a retry of the first.
 
     With a fixed reservation id the second one hit UNIQUE(correlation,

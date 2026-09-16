@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.models import (
     AiCall,
     Chat,
@@ -35,7 +37,6 @@ from app.models.enums import (
     MsgState,
     SourceType,
 )
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 RESTORE_DB = "wabot_restore_check"
 CUSTOMER_TEXT = "Здравствуйте! Сколько стоит курс охранника и когда начало?"
@@ -131,8 +132,19 @@ async def test_dump_restores_the_owners_data(seeded, pg_container) -> None:
     dump = _docker_exec(pg_container, "pg_dump", "-Fc", "-U", user, "-d", database)
     assert dump[:5] == b"PGDMP", "not a custom-format dump"
 
-    _docker_exec(pg_container, "psql", "-U", user, "-d", "postgres", "-c", f"DROP DATABASE IF EXISTS {RESTORE_DB}")
-    _docker_exec(pg_container, "psql", "-U", user, "-d", "postgres", "-c", f"CREATE DATABASE {RESTORE_DB}")
+    _docker_exec(
+        pg_container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        f"DROP DATABASE IF EXISTS {RESTORE_DB}",
+    )
+    _docker_exec(
+        pg_container, "psql", "-U", user, "-d", "postgres", "-c", f"CREATE DATABASE {RESTORE_DB}"
+    )
     try:
         _docker_exec(
             pg_container,
@@ -147,7 +159,9 @@ async def test_dump_restores_the_owners_data(seeded, pg_container) -> None:
         )
 
         def query(sql: str) -> str:
-            out = _docker_exec(pg_container, "psql", "-t", "-A", "-U", user, "-d", RESTORE_DB, "-c", sql)
+            out = _docker_exec(
+                pg_container, "psql", "-t", "-A", "-U", user, "-d", RESTORE_DB, "-c", sql
+            )
             return out.decode().strip()
 
         # Schema version: restoring an older dump onto newer code is the

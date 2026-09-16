@@ -9,6 +9,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.models import (
     AuditLog,
     Chat,
@@ -27,8 +30,6 @@ from app.services.chat_modes import (
     resume_expired_pauses,
 )
 from app.services.inbox_processing import process_inbound_batch
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 @pytest.fixture
@@ -96,14 +97,10 @@ async def test_expired_pause_returns_to_auto_ai_with_history_and_audit(
     async with maker() as db:
         chat = await db.get(Chat, chat_id)
         history = (
-            await db.execute(
-                select(ChatModeHistory).where(ChatModeHistory.chat_id == chat_id)
-            )
+            await db.execute(select(ChatModeHistory).where(ChatModeHistory.chat_id == chat_id))
         ).scalar_one()
         audit = (
-            await db.execute(
-                select(AuditLog).where(AuditLog.action == "chat.mode_changed")
-            )
+            await db.execute(select(AuditLog).where(AuditLog.action == "chat.mode_changed"))
         ).scalar_one()
     assert chat.mode is ChatMode.AUTO_AI
     assert chat.paused_until is None
@@ -145,9 +142,7 @@ async def test_panel_message_pauses_ai(authed_client, db_engine, instance_pk) ->
     assert abs((chat.paused_until - expected).total_seconds()) < 30
 
 
-async def test_panel_reply_mode_human_setting(
-    authed_client, db_engine, instance_pk
-) -> None:
+async def test_panel_reply_mode_human_setting(authed_client, db_engine, instance_pk) -> None:
     client, headers = authed_client
     chat_id = await make_chat(db_engine, instance_pk)
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -164,9 +159,7 @@ async def test_panel_reply_mode_human_setting(
     assert chat.mode is ChatMode.HUMAN
 
 
-async def test_phone_reply_pauses_and_extends_without_history_spam(
-    db_engine, instance_pk
-) -> None:
+async def test_phone_reply_pauses_and_extends_without_history_spam(db_engine, instance_pk) -> None:
     """SPEC §7: operator's phone message activates the pause; every next
     message extends the timer; extensions do not create history rows."""
     chat_id = await make_chat(db_engine, instance_pk)
@@ -203,11 +196,7 @@ async def test_phone_reply_pauses_and_extends_without_history_spam(
     async with maker() as db:
         chat = await db.get(Chat, chat_id)
         history_count = len(
-            (
-                await db.execute(
-                    select(ChatModeHistory).where(ChatModeHistory.chat_id == chat_id)
-                )
-            )
+            (await db.execute(select(ChatModeHistory).where(ChatModeHistory.chat_id == chat_id)))
             .scalars()
             .all()
         )
@@ -254,34 +243,24 @@ async def test_emergency_switch_api(authed_client, db_engine) -> None:
     state = (await client.get("/api/system/ai-switch")).json()
     assert state == {"enabled": True}
 
-    off = await client.put(
-        "/api/system/ai-switch", json={"enabled": False}, headers=headers
-    )
+    off = await client.put("/api/system/ai-switch", json={"enabled": False}, headers=headers)
     assert off.json() == {"enabled": False}
     assert (await client.get("/api/system/ai-switch")).json() == {"enabled": False}
 
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db:
         audit = (
-            (
-                await db.execute(
-                    select(AuditLog).where(AuditLog.action == "settings.changed")
-                )
-            )
+            (await db.execute(select(AuditLog).where(AuditLog.action == "settings.changed")))
             .scalars()
             .all()
         )
     assert any(a.entity_id == "emergency_ai_off" for a in audit)
 
-    on = await client.put(
-        "/api/system/ai-switch", json={"enabled": True}, headers=headers
-    )
+    on = await client.put("/api/system/ai-switch", json={"enabled": True}, headers=headers)
     assert on.json() == {"enabled": True}
 
 
-async def test_manual_mode_api_and_history(
-    authed_client, db_engine, instance_pk
-) -> None:
+async def test_manual_mode_api_and_history(authed_client, db_engine, instance_pk) -> None:
     client, headers = authed_client
     chat_id = await make_chat(db_engine, instance_pk)
 
@@ -310,7 +289,5 @@ async def test_manual_mode_api_and_history(
     ]
     assert all(h["by_admin"] for h in history)
 
-    missing = await client.post(
-        "/api/chats/999999/mode", json={"mode": "AUTO_AI"}, headers=headers
-    )
+    missing = await client.post("/api/chats/999999/mode", json={"mode": "AUTO_AI"}, headers=headers)
     assert missing.status_code == 404

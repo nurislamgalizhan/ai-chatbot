@@ -24,9 +24,7 @@ async def test_tampered_token_is_401_not_500(client, settings, admin_factory) ->
     assert response.status_code == 401
 
 
-async def test_expired_session_is_401(
-    client, settings, admin_factory, db_engine
-) -> None:
+async def test_expired_session_is_401(client, settings, admin_factory, db_engine) -> None:
     admin = await admin_factory()
     await login(client, settings, admin)
     await _age_sessions(db_engine, expires_at=datetime.now(UTC) - timedelta(minutes=1))
@@ -41,9 +39,7 @@ async def test_idle_timeout_is_401(client, settings, admin_factory, db_engine) -
     assert (await client.get("/api/account")).status_code == 401
 
 
-async def test_csrf_required_for_mutating_requests(
-    client, settings, admin_factory
-) -> None:
+async def test_csrf_required_for_mutating_requests(client, settings, admin_factory) -> None:
     admin = await admin_factory()
     csrf = await login(client, settings, admin)
 
@@ -64,9 +60,7 @@ async def test_origin_allowlist_enforced(client, settings, admin_factory) -> Non
     assert response.status_code == 403
 
 
-async def test_password_change_revokes_other_sessions(
-    app, settings, admin_factory
-) -> None:
+async def test_password_change_revokes_other_sessions(app, settings, admin_factory) -> None:
     admin = await admin_factory()
     transport = httpx.ASGITransport(app=app)
     async with (
@@ -91,9 +85,7 @@ async def test_password_change_revokes_other_sessions(
         assert (await first.get("/api/account")).status_code == 401
 
 
-async def test_change_password_requires_current(
-    client, settings, admin_factory
-) -> None:
+async def test_change_password_requires_current(client, settings, admin_factory) -> None:
     admin = await admin_factory()
     csrf = await login(client, settings, admin)
     response = await client.post(
@@ -122,9 +114,7 @@ async def test_mass_assignment_rejected(client, settings, admin_factory) -> None
     assert response.status_code == 422
 
 
-async def test_session_list_and_targeted_revoke(
-    client, settings, admin_factory
-) -> None:
+async def test_session_list_and_targeted_revoke(client, settings, admin_factory) -> None:
     admin = await admin_factory()
     csrf = await login(client, settings, admin)
 

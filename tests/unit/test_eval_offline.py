@@ -15,7 +15,7 @@ from app.eval.offline import (
     OracleChatProvider,
     lexical_tokens,
 )
-from app.eval.runner import REQUIRED_CATEGORIES, load_suite
+from app.eval.runner import REQUIRED_CATEGORIES, load_suite, same_numbers
 from app.services.kb_text import detect_language
 
 GYM = (
@@ -86,6 +86,35 @@ async def test_oracle_service_reply_follows_the_requested_language() -> None:
     )
     result = await oracle.complete(request)
     assert detect_language(result.text).value == "en"
+
+
+@pytest.mark.parametrize(
+    ("answer", "price"),
+    [
+        ("Абонемент стоит 9 000 тенге", "9000"),
+        ("A membership is 9,000 tenge", "9000"),
+        ("Аренда 26 000 тенге/час", "26000"),
+        ("Карта на год — 108 000 тенге", "108000"),
+    ],
+)
+def test_a_price_is_found_however_the_model_formats_it(answer: str, price: str) -> None:
+    """The first live run failed twelve CORRECT answers because the model
+    writes «9 000 тенге» and the criterion says «9000»."""
+    assert same_numbers(price) in same_numbers(answer)
+
+
+@pytest.mark.parametrize(
+    ("text", "unchanged"),
+    [
+        ("Занятие длится 1,5 часа", "1,5"),
+        ("Зал на 20 человек", "20 человек"),
+        ("Пн, Ср, Пт: 15:00–17:00", "15:00"),
+    ],
+)
+def test_normalisation_leaves_everything_but_thousands_alone(text: str, unchanged: str) -> None:
+    """A decimal comma and a plain space are not thousands separators:
+    turning «1,5» into «15» would invent a price that was never said."""
+    assert unchanged in same_numbers(text)
 
 
 def test_suite_file_is_valid_and_covers_the_spec() -> None:

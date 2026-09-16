@@ -102,7 +102,8 @@ services:
     # leaving it alone.
     env_file: [.env]
     environment: *app-env
-    networks: [internal]
+    # internal for postgres/redis, egress for OpenAI and GREEN-API.
+    networks: [internal, egress]
     restart: unless-stopped
     mem_limit: 320m
     cpus: 0.5
@@ -146,7 +147,8 @@ services:
     # PID 1 in the container must reap children and pass on signals.
     init: true
     environment: *app-env
-    networks: [internal]
+    # internal for postgres/redis, egress for OpenAI and GREEN-API.
+    networks: [internal, egress]
     restart: unless-stopped
     # 512m (was 384m): decoding a customer photo with Pillow needs
     # headroom, and an OOM-kill here would take polling, the outbox and
@@ -204,8 +206,18 @@ services:
     <<: *logging
 
 networks:
+  # Database and Redis live here and NOWHERE else: `internal: true` means
+  # the network has no route out, so a compromised database container
+  # cannot phone home, and nothing here is reachable from outside.
   internal:
     internal: true
+  # Outbound only, for the two processes that must reach the internet:
+  # OpenAI (answers, embeddings, speech) and GREEN-API (polling, sending,
+  # media downloads). An ordinary bridge network with NO published ports:
+  # traffic goes out, nothing comes in. Without it both processes sat on
+  # the internal-only network and could not resolve a single hostname.
+  egress:
+  # The host's existing gateway joins this one to reach the panel.
   edge:
 
 volumes:

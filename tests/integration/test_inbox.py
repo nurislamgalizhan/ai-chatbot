@@ -4,6 +4,9 @@ store -> commit -> delete ordering, ignored kinds."""
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.models import InboundNotification, WhatsappInstance
 from app.whatsapp.provider import (
     ProviderError,
@@ -12,8 +15,6 @@ from app.whatsapp.provider import (
     WhatsAppProvider,
 )
 from app.whatsapp.receiver import PollingReceiver, store_notification
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 class FakeProvider(WhatsAppProvider):
@@ -107,15 +108,11 @@ async def test_duplicate_notification_is_stored_once(db_engine, instance_pk) -> 
 async def test_group_notification_is_terminal_ignored(db_engine, instance_pk) -> None:
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     async with maker() as db, db.begin():
-        await store_notification(
-            db, instance_pk, incoming(1, "GRP1", chat_id="1203630000@g.us")
-        )
+        await store_notification(db, instance_pk, incoming(1, "GRP1", chat_id="1203630000@g.us"))
     async with maker() as db:
         row = (
             await db.execute(
-                select(InboundNotification).where(
-                    InboundNotification.provider_message_id == "GRP1"
-                )
+                select(InboundNotification).where(InboundNotification.provider_message_id == "GRP1")
             )
         ).scalar_one()
     assert row.status == "ignored"
@@ -133,17 +130,13 @@ async def test_poll_once_stores_then_deletes(db_engine, instance_pk) -> None:
     async with maker() as db:
         row = (
             await db.execute(
-                select(InboundNotification).where(
-                    InboundNotification.provider_message_id == "MSG7"
-                )
+                select(InboundNotification).where(InboundNotification.provider_message_id == "MSG7")
             )
         ).scalar_one()
     assert row.status == "stored"
 
 
-async def test_failed_delete_redelivery_does_not_duplicate(
-    db_engine, instance_pk
-) -> None:
+async def test_failed_delete_redelivery_does_not_duplicate(db_engine, instance_pk) -> None:
     """delete_notification fails AFTER our commit -> the provider redelivers
     -> the unique constraint absorbs it and delete is attempted again."""
     maker = async_sessionmaker(db_engine, expire_on_commit=False)

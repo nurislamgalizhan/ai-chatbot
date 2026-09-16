@@ -1,7 +1,8 @@
 import pytest
-from app.config import Settings
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
+
+from app.config import Settings
 
 VALID_KEY = Fernet.generate_key().decode()
 DB = "postgresql+asyncpg://u:p@localhost/db"

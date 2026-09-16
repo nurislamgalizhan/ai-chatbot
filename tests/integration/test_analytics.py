@@ -12,6 +12,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.models import AiCall, BudgetLedger, Chat, Message, WhatsappInstance
 from app.models.enums import (
     AnswerSource,
@@ -22,8 +25,6 @@ from app.models.enums import (
     MsgState,
 )
 from app.services import analytics
-from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 TODAY = datetime.now(UTC)
 
@@ -226,9 +227,7 @@ async def test_top_dialogs_sum_to_the_calls(seeded) -> None:
             )
         ).scalar_one()
     assert sum(Decimal(row["cost_usd"]) for row in top) == truth
-    assert Decimal(top[0]["cost_usd"]) >= Decimal(
-        top[-1]["cost_usd"]
-    )  # most expensive first
+    assert Decimal(top[0]["cost_usd"]) >= Decimal(top[-1]["cost_usd"])  # most expensive first
 
 
 async def test_admin_work_is_not_counted_as_answering_customers(seeded) -> None:
@@ -274,9 +273,7 @@ async def test_forecast_rate_includes_spend_the_ledger_never_saw(seeded) -> None
                 spent_usd=Decimal("0.00100000"),
                 reserved_usd=Decimal(0),
                 period_start=TODAY.date().replace(day=1),
-                period_end=(TODAY.date().replace(day=28) + timedelta(days=4)).replace(
-                    day=1
-                )
+                period_end=(TODAY.date().replace(day=28) + timedelta(days=4)).replace(day=1)
                 - timedelta(days=1),
             )
         )
@@ -308,9 +305,7 @@ async def test_forecast_is_arithmetic_on_real_spend(seeded) -> None:
                 spent_usd=Decimal("3.00"),
                 reserved_usd=Decimal(0),
                 period_start=TODAY.date().replace(day=1),
-                period_end=(TODAY.date().replace(day=28) + timedelta(days=4)).replace(
-                    day=1
-                )
+                period_end=(TODAY.date().replace(day=28) + timedelta(days=4)).replace(day=1)
                 - timedelta(days=1),
             )
         )
@@ -330,9 +325,7 @@ async def test_reports_use_indexes_not_a_full_scan(seeded) -> None:
     real EXPLAIN against PostgreSQL, not by reading the query."""
     period = analytics.period_from_days(30)
     async with seeded() as db:
-        await db.execute(
-            text("SET enable_seqscan = off")
-        )  # prove an index CAN serve it
+        await db.execute(text("SET enable_seqscan = off"))  # prove an index CAN serve it
         plan = (
             (
                 await db.execute(

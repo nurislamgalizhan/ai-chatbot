@@ -11,15 +11,15 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-import app.whatsapp.receiver as receiver_module
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+import app.whatsapp.receiver as receiver_module
 from app.models import InboundNotification, SystemEvent, WaOutbox, WhatsappInstance
 from app.whatsapp.outbox import OutboxFlusher, enqueue_text
 from app.whatsapp.provider import RawNotification, SendResult
 from app.whatsapp.receiver import PollingReceiver
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
 from tests.integration.test_inbox import FakeProvider, incoming
 from tests.integration.test_outbox import ScriptedSender
 
@@ -77,20 +77,14 @@ async def test_poison_payload_is_acked_and_does_not_wedge_the_queue(
 
     async with maker() as db:
         rows = (
-            (
-                await db.execute(
-                    select(InboundNotification).order_by(InboundNotification.id)
-                )
-            )
+            (await db.execute(select(InboundNotification).order_by(InboundNotification.id)))
             .scalars()
             .all()
         )
         events = (
             (
                 await db.execute(
-                    select(SystemEvent).where(
-                        SystemEvent.event == "inbound_parse_failed"
-                    )
+                    select(SystemEvent).where(SystemEvent.event == "inbound_parse_failed")
                 )
             )
             .scalars()
@@ -142,8 +136,7 @@ async def test_outbox_row_bug_does_not_roll_back_sent_neighbours(
 
     async with maker() as db:
         by_id = {
-            r.outbound_message_id: r
-            for r in (await db.execute(select(WaOutbox))).scalars().all()
+            r.outbound_message_id: r for r in (await db.execute(select(WaOutbox))).scalars().all()
         }
     assert by_id[good_id].state == "SENT"  # survived, will NOT be re-sent
     assert by_id[bad_id].state == "FAILED_FINAL"
@@ -183,9 +176,7 @@ async def test_send_without_id_message_is_sent_not_retried(
 
     async with maker() as db:
         row = (
-            await db.execute(
-                select(WaOutbox).where(WaOutbox.outbound_message_id == message_id)
-            )
+            await db.execute(select(WaOutbox).where(WaOutbox.outbound_message_id == message_id))
         ).scalar_one()
     assert row.state == "SENT"
     assert row.provider_message_id is None

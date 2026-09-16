@@ -61,6 +61,7 @@ DNS и сертификатов, выполняет владелец по это
 
 ```
 wabot_internal (internal: true):  postgres, redis, backend, worker, frontend
+wabot_egress:                     backend, worker  (только исходящие)
 wabot_edge:                       frontend + app-gateway-nginx (подключается владельцем)
 ```
 
@@ -69,6 +70,14 @@ wabot_edge:                       frontend + app-gateway-nginx (подключа
   8081/8082 — по умолчанию выключен.
 - БД и Redis живут только в `wabot_internal` (internal: true — без выхода
   наружу), шлюз их не видит.
+- **`wabot_egress` — исходящий доступ для `backend` и `worker`**: без него
+  сеть с `internal: true` не даёт даже DNS, и оба процесса не могут
+  обратиться ни к OpenAI, ни к GREEN-API (проверено вживую 2026-09-16:
+  «Temporary failure in name resolution»). Это обычная bridge-сеть БЕЗ
+  публикации портов: трафик идёт наружу, внутрь никто не заходит. БД и
+  Redis в неё не подключены сознательно — скомпрометированный контейнер
+  базы не должен иметь выхода в интернет. Проводку сторожит
+  `tests/unit/test_compose_wiring.py`.
 - Подключение шлюза: в каталоге gateway-проекта владелец добавляет
   compose-override, подключающий `app-gateway-nginx` к сети `wabot_edge`.
   Мы не входим в чужую сеть `mercury-medet-app_default` — меньше связности

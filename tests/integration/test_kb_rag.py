@@ -292,7 +292,7 @@ async def test_embedding_spend_is_priced_from_the_input_price_alone(
     # 0.02 $ per 1M tokens: a few hundred tokens is a few millionths.
     assert call.cost_usd == (
         Decimal(call.input_tokens) * Decimal("0.02") / Decimal(1_000_000)
-    ).quantize(Decimal("0.000001"))
+    ).quantize(Decimal("0.00000001"))
     assert call.cost_usd > 0
     assert call.cost_kzt > 0
 

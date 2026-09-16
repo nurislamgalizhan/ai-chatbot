@@ -36,9 +36,7 @@ async def test_unknown_phone_and_wrong_password_are_indistinguishable(
     assert unknown.json() == wrong.json()
 
 
-async def test_challenge_token_is_not_a_session(
-    client, settings, admin_factory
-) -> None:
+async def test_challenge_token_is_not_a_session(client, settings, admin_factory) -> None:
     """Intermediate 'password accepted' state must grant zero API access."""
     admin = await admin_factory()
     step1 = await client.post(
@@ -72,9 +70,7 @@ async def test_totp_replay_rejected(app, settings, admin_factory) -> None:
     transport = httpx.ASGITransport(app=app)
 
     async def attempt() -> int:
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as c:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
             step1 = await c.post(
                 "/api/auth/login",
                 json={"phone": admin.phone, "password": TEST_PASSWORD},

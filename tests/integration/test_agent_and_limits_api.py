@@ -7,6 +7,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+from asgi_lifespan import LifespanManager
+from fakeredis.aioredis import FakeRedis
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.main import create_app
 from app.models import AiCall, BudgetLedger, Chat, FxRate, Message, WhatsappInstance
 from app.models.enums import (
@@ -16,11 +21,6 @@ from app.models.enums import (
     MsgSource,
     MsgState,
 )
-from asgi_lifespan import LifespanManager
-from fakeredis.aioredis import FakeRedis
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
 from tests.conftest import login
 
 INSTRUCTION = {
@@ -36,9 +36,7 @@ INSTRUCTION = {
 
 async def test_instruction_versions_and_rollback(authed_client) -> None:
     client, headers = authed_client
-    v1 = (
-        await client.post("/api/agent/instructions", json=INSTRUCTION, headers=headers)
-    ).json()
+    v1 = (await client.post("/api/agent/instructions", json=INSTRUCTION, headers=headers)).json()
     assert v1["version"] == 1
     assert v1["is_active"] is False  # never active on creation
 
@@ -47,9 +45,7 @@ async def test_instruction_versions_and_rollback(authed_client) -> None:
         **INSTRUCTION,
         "system_prompt": "Вторая версия инструкции для проверки.",
     }
-    v2 = (
-        await client.post("/api/agent/instructions", json=v2_payload, headers=headers)
-    ).json()
+    v2 = (await client.post("/api/agent/instructions", json=v2_payload, headers=headers)).json()
     await client.post(f"/api/agent/instructions/{v2['id']}/activate", headers=headers)
 
     listing = (await client.get("/api/agent/instructions")).json()
@@ -75,9 +71,7 @@ async def test_sandbox_is_honest_without_key_and_instruction(authed_client) -> N
     created = (
         await client.post("/api/agent/instructions", json=INSTRUCTION, headers=headers)
     ).json()
-    await client.post(
-        f"/api/agent/instructions/{created['id']}/activate", headers=headers
-    )
+    await client.post(f"/api/agent/instructions/{created['id']}/activate", headers=headers)
     # Instruction present but no OpenAI key in tests -> 503, not a fake answer.
     response = await client.post(
         "/api/agent/sandbox", json={"question": "Сколько стоит зал?"}, headers=headers
@@ -96,7 +90,6 @@ async def test_sandbox_runs_and_accounts_money_with_chat_id_null(
     from app.ai.chat_provider import FakeChatProvider, make_result
     from app.services.agent import activate_version, create_version
     from app.services.pricing import seed_default_prices
-
     from tests.integration.test_kb_rag import ScriptedEmbeddings, unit_vector
 
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -124,9 +117,7 @@ async def test_sandbox_runs_and_accounts_money_with_chat_id_null(
     class PricedScripted(ScriptedEmbeddings):
         model = "text-embedding-3-small"
 
-    embeddings = PricedScripted(
-        {question: unit_vector(0.0), body_text: unit_vector(0.05)}
-    )
+    embeddings = PricedScripted({question: unit_vector(0.0), body_text: unit_vector(0.05)})
     async with maker() as db, db.begin():
         document = KbDocument(
             title="Абонементы",
@@ -152,9 +143,7 @@ async def test_sandbox_runs_and_accounts_money_with_chat_id_null(
     admin = await admin_factory()
     async with LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             csrf = await login(client, settings, admin)
             response = await client.post(
                 "/api/agent/sandbox",
@@ -201,9 +190,7 @@ async def test_limits_roundtrip_and_validation(authed_client, db_engine) -> None
     assert response.status_code == 422
 
     updated_settings = dict(snapshot["settings"], daily_ai_budget_kzt=500)
-    response = await client.put(
-        "/api/limits", json={"settings": updated_settings}, headers=headers
-    )
+    response = await client.put("/api/limits", json={"settings": updated_settings}, headers=headers)
     assert response.status_code == 200
     assert response.json()["settings"]["daily_ai_budget_kzt"] == 500
 
@@ -265,9 +252,7 @@ async def test_message_ai_call_details(authed_client, db_engine) -> None:
         )
         db.add(instance)
         await db.flush()
-        chat = Chat(
-            instance_id=instance.id, wa_chat_id="77010000001@c.us", phone="+77010000001"
-        )
+        chat = Chat(instance_id=instance.id, wa_chat_id="77010000001@c.us", phone="+77010000001")
         db.add(chat)
         await db.flush()
         message = Message(
@@ -296,9 +281,7 @@ async def test_message_ai_call_details(authed_client, db_engine) -> None:
         )
         chat_id, message_id = chat.id, message.id
 
-    found = (
-        await client.get(f"/api/chats/{chat_id}/messages/{message_id}/ai-call")
-    ).json()
+    found = (await client.get(f"/api/chats/{chat_id}/messages/{message_id}/ai-call")).json()
     assert found["found"] is True
     assert found["call"]["input_tokens"] == 1000
     assert found["call"]["cost_kzt"] == "0.1600"
@@ -316,7 +299,5 @@ async def test_message_ai_call_details(authed_client, db_engine) -> None:
         db.add(other)
         await db.flush()
         other_id = other.id
-    empty = (
-        await client.get(f"/api/chats/{chat_id}/messages/{other_id}/ai-call")
-    ).json()
+    empty = (await client.get(f"/api/chats/{chat_id}/messages/{other_id}/ai-call")).json()
     assert empty == {"found": False, "call": None}

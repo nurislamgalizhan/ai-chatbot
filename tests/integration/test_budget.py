@@ -12,6 +12,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.models import AlertNotification, BudgetLedger, BudgetReservation, ModelPrice
 from app.models.enums import BudgetScope, PriceUnit, ReservationStatus
 from app.services import app_settings, budget
@@ -27,8 +30,6 @@ from app.services.pricing import (
     seed_default_prices,
     usd_to_kzt,
 )
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 RATE = Decimal(500)  # 1 USD = 500 KZT for readable numbers
 
@@ -52,9 +53,7 @@ async def _set_limits_kzt(
         await set_setting(db, app_settings.DAILY_AI_BUDGET_KZT, float(day))
         await set_setting(db, app_settings.MONTHLY_AI_BUDGET_KZT, float(month))
         await set_setting(db, app_settings.MAX_AI_COST_PER_DIALOG_KZT, float(dialog))
-        await set_setting(
-            db, app_settings.MAX_AI_COST_PER_USER_PER_DAY_KZT, float(user_day)
-        )
+        await set_setting(db, app_settings.MAX_AI_COST_PER_USER_PER_DAY_KZT, float(user_day))
 
 
 def _maker(db_engine) -> async_sessionmaker:
@@ -231,16 +230,12 @@ async def test_threshold_alerts_once_per_period(db_engine) -> None:
         chat_id=1,
         phone="+77010000001",
     )
-    await budget.settle(
-        maker, sub_correlation="c7:main", actual_usd=Decimal("0.010000")
-    )
+    await budget.settle(maker, sub_correlation="c7:main", actual_usd=Decimal("0.010000"))
     async with maker() as db:
         alerts = (
             (
                 await db.execute(
-                    select(AlertNotification).where(
-                        AlertNotification.kind == "budget_day"
-                    )
+                    select(AlertNotification).where(AlertNotification.kind == "budget_day")
                 )
             )
             .scalars()
@@ -262,9 +257,7 @@ async def test_threshold_alerts_once_per_period(db_engine) -> None:
         count = len(
             (
                 await db.execute(
-                    select(AlertNotification).where(
-                        AlertNotification.kind == "budget_day"
-                    )
+                    select(AlertNotification).where(AlertNotification.kind == "budget_day")
                 )
             )
             .scalars()
@@ -322,8 +315,7 @@ def test_cost_formula_matches_manual_math() -> None:
     assert usd_to_kzt(Decimal("0.001"), RATE) == Decimal("0.5000")
     estimate = estimate_max_cost_usd(prices, 12_000, 350)
     assert estimate == (
-        (Decimal(12_000) * Decimal("0.20") + Decimal(350) * Decimal("1.20"))
-        / Decimal(1_000_000)
+        (Decimal(12_000) * Decimal("0.20") + Decimal(350) * Decimal("1.20")) / Decimal(1_000_000)
     ).quantize(Decimal("0.000001"))
 
 
@@ -366,9 +358,7 @@ async def test_price_journal_uses_effective_from(db_engine, settings) -> None:
     assert sheet_after.input_usd == Decimal("0.40")
 
 
-async def test_missing_price_fails_closed_and_seed_is_idempotent(
-    db_engine, settings
-) -> None:
+async def test_missing_price_fails_closed_and_seed_is_idempotent(db_engine, settings) -> None:
     maker = _maker(db_engine)
     async with maker() as db:
         with pytest.raises(PricingError):

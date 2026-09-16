@@ -8,6 +8,7 @@ crafted payload must not be able to make us fetch them.
 from __future__ import annotations
 
 import pytest
+
 from app.whatsapp.download_guard import DownloadNotAllowedError, check_download_url
 
 HOSTS = ("green-api.com", "greenapi.com")

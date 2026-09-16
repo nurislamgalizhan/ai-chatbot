@@ -37,6 +37,8 @@ from app.eval.scratch import (
     migrate,
     scratch_redis_url,
 )
+from app.services import app_settings
+from app.services.app_settings import set_setting
 from app.services.generation import GenerationDeps
 
 if TYPE_CHECKING:
@@ -44,6 +46,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+    from app.ai.embeddings import EmbeddingProvider
     from app.config import Settings
 
 _HTTP_OK = 200
@@ -59,7 +62,7 @@ class ScratchRun:
     engine: AsyncEngine
     sessionmaker: async_sessionmaker[AsyncSession]
     redis: Redis
-    embeddings: LexicalEmbeddings
+    embeddings: EmbeddingProvider
     seeded: SeededFixture
 
 
@@ -71,8 +74,16 @@ async def scratch_run(
     keep_db: bool,
     overrides: dict[str, object] | None = None,
     pool_size: int = 10,
+    embeddings: EmbeddingProvider | None = None,
+    budget_kzt: int | None = None,
 ) -> AsyncIterator[ScratchRun]:
-    """Create + migrate + seed a scratch database; drop it afterwards."""
+    """Create + migrate + seed a scratch database; drop it afterwards.
+
+    `embeddings` replaces the lexical stand-in (the live run passes the
+    real provider). `budget_kzt` lowers the scratch database's own daily
+    and monthly limits: a hard stop on how much one run can possibly
+    spend, independent of anything OpenAI is configured to allow.
+    """
     scratch = await create_scratch_database(settings.database_url)
     print(f"Временная база: {scratch.name}", file=sys.stderr)
     engine: AsyncEngine | None = None
@@ -92,9 +103,13 @@ async def scratch_run(
         sessionmaker = build_sessionmaker(engine)
         redis = Redis.from_url(run_settings.redis_url)
         await redis.flushdb()
-        embeddings = LexicalEmbeddings(model=settings.openai_embedding_model)
-        seeded = await seed_fixture(sessionmaker, run_settings, suite.fixture, embeddings)
-        yield ScratchRun(scratch, run_settings, engine, sessionmaker, redis, embeddings, seeded)
+        provider = embeddings or LexicalEmbeddings(model=settings.openai_embedding_model)
+        seeded = await seed_fixture(sessionmaker, run_settings, suite.fixture, provider)
+        if budget_kzt is not None:
+            async with sessionmaker() as db, db.begin():
+                await set_setting(db, app_settings.DAILY_AI_BUDGET_KZT, budget_kzt)
+                await set_setting(db, app_settings.MONTHLY_AI_BUDGET_KZT, budget_kzt)
+        yield ScratchRun(scratch, run_settings, engine, sessionmaker, redis, provider, seeded)
     finally:
         if redis is not None:
             await redis.flushdb()
@@ -126,12 +141,69 @@ async def run_offline_eval(settings: Settings, suite: EvalSuite, *, keep_db: boo
     return report
 
 
-def confirm_live_eval(settings: Settings, suite: EvalSuite, *, yes: bool) -> bool:
+async def run_live_fixture_eval(
+    settings: Settings, suite: EvalSuite, *, keep_db: bool, budget_kzt: int = 150
+) -> EvalReport:
+    """The real model and real embeddings against the REFERENCE knowledge
+    base in a scratch database.
+
+    This is the cheap, repeatable live run: the criteria in cases.json
+    were written against this fixture, the documents are actually
+    indexed, and the owner's own database keeps its reports clean (no
+    eval spend, no eval chats). What it does NOT prove is the owner's
+    own content — that needs `--live` against their database once the
+    documents are activated and the translations approved.
+    """
+    from app.ai.chat_provider import OpenAIChatProvider  # noqa: PLC0415 - needs a key
+    from app.ai.embeddings import OpenAIEmbeddingProvider  # noqa: PLC0415
+
+    embeddings = OpenAIEmbeddingProvider(settings)
+    recorder = RecordingChatProvider(OpenAIChatProvider(settings))
+    try:
+        async with scratch_run(
+            settings,
+            suite,
+            keep_db=keep_db,
+            # The production relevance threshold: the 0.10 of the lexical
+            # stand-in has no meaning for real embeddings.
+            overrides={"rag_min_score": settings.rag_min_score},
+            embeddings=embeddings,
+            budget_kzt=budget_kzt,
+        ) as run:
+            deps = GenerationDeps(
+                sessionmaker=run.sessionmaker,
+                settings=run.settings,
+                redis=run.redis,
+                chat_provider=recorder,
+                embedding_provider=embeddings,
+            )
+            report = await run_suite(deps, suite, mode="live", requests=recorder.requests)
+    finally:
+        await recorder.aclose()
+        await embeddings.aclose()
+    report.notes.insert(
+        0,
+        f"Прогон по ЭТАЛОННОЙ базе во временной БД (документов {run.seeded.documents}, "
+        f"выучено {run.seeded.indexed}, фрагментов {run.seeded.chunks}, записей FAQ "
+        f"{run.seeded.faq}), не по вашей: ваша база и отчёты не затронуты. "
+        f"Предохранитель: дневной и месячный лимит временной базы {budget_kzt} ₸.",
+    )
+    return report
+
+
+def confirm_live_eval(
+    settings: Settings, suite: EvalSuite, *, yes: bool, fixture: bool = False
+) -> bool:
     paid = sum(1 for c in suite.cases if c.expect.kinds != ["faq"])
+    target = (
+        "против ЭТАЛОННОЙ базы во временной БД (ваша база и отчёты не затронуты)"
+        if fixture
+        else "против ВАШЕЙ базы знаний и ВАШИХ лимитов; расходы попадут в «Расходы» "
+        "как работа в панели"
+    )
     print(
         f"ЖИВОЙ прогон: {len(suite.cases)} кейсов, до {paid} платных вызовов модели "
-        f"({settings.openai_chat_model}) против ВАШЕЙ базы знаний и ВАШИХ лимитов. "
-        "Расходы попадут в «Расходы» как работа в панели.",
+        f"({settings.openai_chat_model}) {target}.",
         file=sys.stderr,
     )
     if yes:

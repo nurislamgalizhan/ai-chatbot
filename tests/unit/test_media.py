@@ -15,11 +15,12 @@ import wave
 from pathlib import Path
 
 import pytest
+from PIL import Image
+
 from app.media import images, sensitive, storage
 from app.media.audio import AudioError, probe_duration_seconds
 from app.media.images import ImageError, prepare_image
 from app.media.storage import MediaStorageError
-from PIL import Image
 
 # ------------------------------ fixtures -------------------------------
 
@@ -170,7 +171,7 @@ def test_pixel_limit_is_restored_after_failure(monkeypatch) -> None:
     before = Image.MAX_IMAGE_PIXELS
     with pytest.raises(ImageError):
         prepare_image(b"garbage")
-    assert Image.MAX_IMAGE_PIXELS == before
+    assert before == Image.MAX_IMAGE_PIXELS
 
 
 def test_card_like_crop_is_flagged() -> None:
@@ -236,20 +237,14 @@ def test_benign_captions_pass(caption: str | None) -> None:
 
 
 def test_card_number_in_caption_is_blocked() -> None:
-    assert (
-        sensitive.caption_is_sensitive("4400 4301 2345 6789") == "caption_card_number"
-    )
+    assert sensitive.caption_is_sensitive("4400 4301 2345 6789") == "caption_card_number"
     assert sensitive.caption_is_sensitive("мой иин 950101300123") == "caption_keyword"
     assert sensitive.caption_is_sensitive("номер 123456789012") == "caption_long_digits"
 
 
 def test_verdict_combines_caption_and_shape() -> None:
     assert sensitive.image_is_sensitive("фото зала", looks_like_card_scan=False) is None
+    assert sensitive.image_is_sensitive("фото зала", looks_like_card_scan=True) == "card_like_crop"
     assert (
-        sensitive.image_is_sensitive("фото зала", looks_like_card_scan=True)
-        == "card_like_crop"
-    )
-    assert (
-        sensitive.image_is_sensitive("мой паспорт", looks_like_card_scan=False)
-        == "caption_keyword"
+        sensitive.image_is_sensitive("мой паспорт", looks_like_card_scan=False) == "caption_keyword"
     )

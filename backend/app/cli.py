@@ -151,12 +151,20 @@ def _emit(
         print(markdown, end="")
 
 
-async def _cmd_eval(
-    *, live: bool, out: Path | None, cases: Path, keep_db: bool, yes: bool, as_json: bool
+async def _cmd_eval(  # noqa: PLR0913 - one flag per run mode
+    *,
+    live: bool,
+    fixture: bool,
+    out: Path | None,
+    cases: Path,
+    keep_db: bool,
+    yes: bool,
+    as_json: bool,
 ) -> int:
     from app.eval.commands import (  # noqa: PLC0415
         confirm_live_eval,
         run_live_eval,
+        run_live_fixture_eval,
         run_offline_eval,
     )
     from app.eval.runner import load_suite  # noqa: PLC0415
@@ -164,23 +172,23 @@ async def _cmd_eval(
     settings = get_settings()
     _quiet_logging(settings)
     suite = load_suite(cases)
+    stem = "eval-offline"
     if live:
         if not settings.openai_api_key:
             print("Живой прогон невозможен: в .env нет OPENAI_API_KEY.", file=sys.stderr)
             return 2
-        if not confirm_live_eval(settings, suite, yes=yes):
+        if not confirm_live_eval(settings, suite, yes=yes, fixture=fixture):
             print("Отменено.", file=sys.stderr)
             return 1
-        report = await run_live_eval(settings, suite)
+        if fixture:
+            stem = "eval-live-fixture"
+            report = await run_live_fixture_eval(settings, suite, keep_db=keep_db)
+        else:
+            stem = "eval-live"
+            report = await run_live_eval(settings, suite)
     else:
         report = await run_offline_eval(settings, suite, keep_db=keep_db)
-    _emit(
-        report.render_markdown(),
-        report.to_dict(),
-        out=out,
-        stem=f"eval-{'live' if live else 'offline'}",
-        as_json=as_json,
-    )
+    _emit(report.render_markdown(), report.to_dict(), out=out, stem=stem, as_json=as_json)
     return 1 if report.mandatory_failed else 0
 
 
@@ -236,8 +244,11 @@ def main() -> None:
     sub.add_parser("seed-prices", help="Insert SPEC default model prices (owner-run, idempotent)")
 
     eval_parser = sub.add_parser("eval", help="Run the acceptance eval set (offline by default)")
+    eval_parser.add_argument("--live", action="store_true", help="real OpenAI and real money")
     eval_parser.add_argument(
-        "--live", action="store_true", help="real OpenAI, real database, real money"
+        "--fixture",
+        action="store_true",
+        help="with --live: the reference knowledge base in a scratch database, not the owner's",
     )
     eval_parser.add_argument(
         "--yes", action="store_true", help="skip the confirmation of a live run"
@@ -289,6 +300,7 @@ def main() -> None:
             asyncio.run(
                 _cmd_eval(
                     live=args.live,
+                    fixture=args.fixture,
                     out=args.out,
                     cases=args.cases or CASES_PATH,
                     keep_db=args.keep_db,

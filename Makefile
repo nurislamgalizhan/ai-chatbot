@@ -4,7 +4,7 @@ PY ?= .venv/bin/python
 
 .PHONY: up up-dev down build logs migrate revision test lint fmt \
         create-admin reset-admin-password kb-import seed-prices venv smoke \
-        eval eval-live load-test preflight \
+        eval eval-live eval-live-fixture load-test preflight \
         backup backup-verify
 
 up:
@@ -62,7 +62,7 @@ test:
 	$(PY) -m pytest tests -q
 
 lint:
-	cd backend && ../.venv/bin/ruff check app && ../.venv/bin/ruff format --check app
+	cd backend && ../.venv/bin/ruff check app ../tests && ../.venv/bin/ruff format --check app ../tests
 	cd backend && ../.venv/bin/mypy app
 	cd backend && ../.venv/bin/bandit -q -r app -c pyproject.toml
 	.venv/bin/pip-audit --skip-editable --progress-spinner off
@@ -84,6 +84,15 @@ eval-live:
 	mkdir -p reports
 	$(COMPOSE) run --rm backend python -m app.cli eval --live --yes > reports/eval-live.md
 	@echo "Отчёт: reports/eval-live.md"
+
+# Live eval against the REFERENCE knowledge base in a scratch database:
+# the real model, repeatable criteria, and the owner's own database and
+# reports untouched. This is the cheap one — a few tenge.
+eval-live-fixture:
+	mkdir -p reports
+	$(COMPOSE) run --rm -T backend python -m app.cli eval --live --fixture --yes \
+		> reports/eval-live-fixture.md
+	@echo "Отчёт: reports/eval-live-fixture.md"
 
 # 5 and 30 parallel chats through the whole chain, DRY_RUN, scratch database.
 load-test:

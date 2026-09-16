@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 import pytest
+
 from app.ai.chat_provider import ChatError, ChatRequest, OpenAIChatProvider
 from app.services.pricing import PriceSheet, Usage, compute_cost_usd
 
@@ -34,9 +35,7 @@ class _Response:
     """Shaped like the OpenAI SDK's completion object."""
 
     def __init__(self, *, text: str, completion: int, reasoning: int) -> None:
-        self.choices = [
-            type("Choice", (), {"message": type("Msg", (), {"content": text})()})()
-        ]
+        self.choices = [type("Choice", (), {"message": type("Msg", (), {"content": text})()})()]
         self.model = "gpt-5.6-luna"
         self.usage = type(
             "Usage",
@@ -45,9 +44,7 @@ class _Response:
                 "prompt_tokens": 1000,
                 "completion_tokens": completion,  # includes reasoning
                 "prompt_tokens_details": type("P", (), {"cached_tokens": 400})(),
-                "completion_tokens_details": type(
-                    "C", (), {"reasoning_tokens": reasoning}
-                )(),
+                "completion_tokens_details": type("C", (), {"reasoning_tokens": reasoning})(),
             },
         )()
 

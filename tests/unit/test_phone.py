@@ -1,4 +1,5 @@
 import pytest
+
 from app.services.phone import PhoneValidationError, normalize_phone
 
 

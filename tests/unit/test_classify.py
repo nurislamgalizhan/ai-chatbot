@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+
 from app.whatsapp.classify import IGNORED_KINDS, Kind, classify
 
 
@@ -54,9 +55,7 @@ def test_sticker_is_separated_from_private_text() -> None:
         ("outgoingAPIMessageReceived", Kind.OUTGOING_API),
     ],
 )
-def test_outgoing_kinds_never_map_to_incoming(
-    webhook_type: str, expected: Kind
-) -> None:
+def test_outgoing_kinds_never_map_to_incoming(webhook_type: str, expected: Kind) -> None:
     body = _incoming("77011234567@c.us")
     body["typeWebhook"] = webhook_type
     result = classify(1, body)

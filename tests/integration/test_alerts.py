@@ -12,6 +12,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.config import Settings
 from app.models import AlertNotification, BudgetLedger, Chat, Message, WaOutbox, WhatsappInstance
 from app.models.enums import BudgetScope
@@ -25,10 +28,8 @@ from app.services.alerts import (
     wa_chat_id_for,
 )
 from app.services.app_settings import set_setting
-from app.whatsapp.outbox import ALERT_PURPOSE, OutboxFlusher
+from app.whatsapp.outbox import OutboxFlusher
 from app.whatsapp.provider import ProviderError, SendResult, WhatsAppProvider
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 OWNER_PHONE = "+77015550001"
 
@@ -268,8 +269,8 @@ async def test_the_owner_is_not_a_customer(maker) -> None:
     assert is_alert_chat("77019999999@c.us", OWNER_PHONE) is False
     assert is_alert_chat(wa_chat_id_for(OWNER_PHONE), "") is False
 
-    from app.services.inbox_processing import process_inbound_batch
     from app.models import InboundNotification
+    from app.services.inbox_processing import process_inbound_batch
 
     async with maker() as db:
         instance_id = (await db.execute(select(WhatsappInstance.id))).scalar_one()

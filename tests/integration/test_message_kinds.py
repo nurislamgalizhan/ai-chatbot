@@ -15,6 +15,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.models import (
     AlertNotification,
     Chat,
@@ -26,8 +29,6 @@ from app.models import (
 from app.models.enums import MediaType, MsgState
 from app.services.inbox_processing import process_inbound_batch
 from app.whatsapp.classify import Kind, classify
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 CHAT_ID = "77010000021@c.us"
 
@@ -43,7 +44,9 @@ def notification(type_message: str, message_data: dict[str, Any], *, id_message:
 
 
 def text_notification(text: str, *, id_message: str) -> dict:
-    return notification("textMessage", {"textMessageData": {"textMessage": text}}, id_message=id_message)
+    return notification(
+        "textMessage", {"textMessageData": {"textMessage": text}}, id_message=id_message
+    )
 
 
 @pytest.fixture
@@ -329,7 +332,11 @@ async def test_quota_exceeded_is_an_alert_not_a_shrug(maker) -> None:
 
     async with maker() as db:
         events = (
-            (await db.execute(select(SystemEvent).where(SystemEvent.event == "provider_quota_exceeded")))
+            (
+                await db.execute(
+                    select(SystemEvent).where(SystemEvent.event == "provider_quota_exceeded")
+                )
+            )
             .scalars()
             .all()
         )

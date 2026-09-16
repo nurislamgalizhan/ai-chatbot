@@ -9,10 +9,10 @@ from typing import Any
 
 import httpx
 import pytest
+
 from app.services.wa_payload import parse_message
 from app.whatsapp.classify import Kind, classify
 from app.whatsapp.provider import ProviderError
-
 from tests.unit.test_green_api_provider import make_provider
 
 

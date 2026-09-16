@@ -13,6 +13,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
 from app.models import (
     AiCall,
     AlertNotification,
@@ -37,8 +40,6 @@ from app.models.enums import (
     MsgState,
 )
 from app.services import retention
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 OLD = datetime.now(UTC) - timedelta(days=400)
 RECENT = datetime.now(UTC) - timedelta(hours=1)
@@ -187,7 +188,9 @@ async def test_journals_are_trimmed_to_their_windows(seeded) -> None:
         events = (await db.execute(select(SystemEvent.event))).scalars().all()
         audits = (await db.execute(select(func.count()).select_from(AuditLog))).scalar_one()
         misses = (await db.execute(select(func.count()).select_from(KbFaqMiss))).scalar_one()
-        alerts = (await db.execute(select(func.count()).select_from(AlertNotification))).scalar_one()
+        alerts = (
+            await db.execute(select(func.count()).select_from(AlertNotification))
+        ).scalar_one()
     assert "fresh" in events
     assert "old" not in events
     assert audits == 1
