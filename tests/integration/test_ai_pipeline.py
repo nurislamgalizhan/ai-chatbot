@@ -460,19 +460,30 @@ async def test_rate_limited_user_is_ignored_for_free(env) -> None:
 
 
 async def test_spam_repeats_are_ignored(env) -> None:
+    """N identical ATTEMPTS in a row (SPEC §6.7.5). One debounce batch is
+    one attempt however many repeats it holds: since 2026-09-17 the
+    window can be a minute long, and counting lines inside a batch meant
+    a customer nudging a deliberately slow bot got silence."""
     maker = env["maker"]
     async with maker() as db, db.begin():
         await set_setting(db, app_settings.SPAM_REPEAT_THRESHOLD, 3)
+    env["chat_provider"].script = [make_result(ANSWER, input_tokens=1000) for _ in range(2)]
     chat_id = await make_chat(maker, env["instance_pk"])
-    ids = [await add_queued(maker, chat_id, "купите подписку") for _ in range(3)]
 
-    await env["pipeline"].run_once()
+    ids = []
+    for _ in range(3):
+        ids.append(await add_queued(maker, chat_id, "купите подписку"))
+        await env["pipeline"].run_once()
 
-    for msg_id in ids:
-        message = await get_message(maker, msg_id)
-        assert message.state is MsgState.IGNORED
-        assert message.error_code == "spam"
-    assert env["chat_provider"].requests == []
+    # Первые две попытки обработаны, третья — спам и молчание.
+    assert (await get_message(maker, ids[0])).state is not MsgState.IGNORED
+    third = await get_message(maker, ids[2])
+    assert third.state is MsgState.IGNORED
+    assert third.error_code == "spam"
+    async with maker() as db:
+        chat = await db.get(Chat, chat_id)
+    # Молчание видно менеджеру: иначе чат просто исчезает из работы.
+    assert chat.needs_attention
 
 
 # --------------------------- free answers -------------------------------

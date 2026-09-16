@@ -89,9 +89,20 @@ def disk_usage_for(path: str) -> shutil._ntuple_diskusage:
 
 async def collect(db: AsyncSession, *, media_dir: str) -> SystemSnapshot:
     now = datetime.now(UTC)
+    # Only messages that SHOULD already have been handled count as a
+    # queue: with the debounce set to a minute, everything written in the
+    # last minute is waiting by configuration, not because the bot is
+    # falling behind, and counting it raised «очередь растёт» on a normal
+    # evening spike.
+    debounce = int(await get_setting(db, app_settings.DEBOUNCE_SECONDS))
     queue_depth = (
         await db.execute(
-            select(func.count()).select_from(Message).where(Message.state == MsgState.QUEUED)
+            select(func.count())
+            .select_from(Message)
+            .where(
+                Message.state == MsgState.QUEUED,
+                Message.created_at <= now - timedelta(seconds=debounce),
+            )
         )
     ).scalar_one()
     oldest = (

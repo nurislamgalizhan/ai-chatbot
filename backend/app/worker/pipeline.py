@@ -25,6 +25,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.ai import guardrails
 from app.ai.context_builder import HistoryTurn
 from app.models import AiCall, Chat, ChatMemory, Message, SystemEvent
 from app.models.enums import (
@@ -124,6 +125,12 @@ _HISTORY_LIMIT = 10
 # The PROCESSING lease: a claim older than this with no progress is an
 # orphan (crashed worker) and belongs to the sweeper.
 _PROCESSING_LEASE = timedelta(minutes=10)
+#: Hard ceiling on how long the debounce may hold a message. The window
+#: is sliding — every new message restarts it — so a customer who keeps
+#: typing every N seconds with the debounce set to N would never be
+#: answered at all. At the default 3 s this never fires; it exists for
+#: the long windows the owner can now choose (up to 60 s).
+_MAX_DEBOUNCE_WAIT = timedelta(seconds=120)
 _NOT_CONFIGURED_RETRY = timedelta(minutes=5)
 _RETRY_BACKOFF_BASE_SECONDS = 30
 _HISTORY_ASSISTANT_SOURCES = (MsgSource.AI, MsgSource.OPERATOR_PANEL, MsgSource.OPERATOR_PHONE)
@@ -154,6 +161,31 @@ def answer_source_of(kind: str) -> AnswerSource:
     return AnswerSource.SERVICE
 
 
+def merged_parts(messages: list[Message]) -> list[str]:
+    """The texts of one debounce batch, ready to be joined.
+
+    Two things happen here, both of which matter once the window is
+    seconds rather than milliseconds:
+
+    * identical repeats collapse. A customer waiting on a slow bot sends
+      «Алло» five times; as five separate lines they trip the spam gate
+      and buy total silence, while as one line they are one ordinary
+      question answered once.
+    * the batch is trimmed to what the guardrails accept, keeping the
+      MOST RECENT messages. Six paragraphs typed over a minute are each
+      fine alone but exceed the limit merged, and refusing them with
+      «напишите короче» to someone who did write it in parts is absurd.
+    """
+    texts: list[str] = []
+    for message in messages:
+        text = message_text(message)
+        if text and (not texts or normalize_query(text) != normalize_query(texts[-1])):
+            texts.append(text)
+    while len(texts) > 1 and len("\n".join(texts)) > guardrails.MAX_QUESTION_CHARS:
+        texts.pop(0)
+    return texts
+
+
 def message_text(message: Message) -> str:
     """What the model sees for one message.
 
@@ -180,7 +212,18 @@ class AiPipeline:
             debounce = int(await get_setting(db, app_settings.DEBOUNCE_SECONDS))
             rows = (
                 await db.execute(
-                    select(Message.chat_id, func.max(Message.created_at))
+                    select(
+                        Message.chat_id,
+                        func.max(Message.created_at),
+                        func.min(Message.created_at),
+                        # Files, locations and contact cards never reach the
+                        # model: they buy a receipt and a manager. Making
+                        # them wait out the debounce delays the handoff for
+                        # nothing.
+                        func.bool_or(
+                            Message.media_type.is_not(None) & Message.media_type.notin_(PROCESSABLE)
+                        ),
+                    )
                     .where(
                         Message.state == MsgState.QUEUED,
                         Message.direction == MsgDirection.IN,
@@ -201,7 +244,14 @@ class AiPipeline:
                     .limit(_CHAT_BATCH)
                 )
             ).all()
-        due = [chat_id for chat_id, last_at in rows if last_at <= now - timedelta(seconds=debounce)]
+        window = timedelta(seconds=debounce)
+        due = [
+            chat_id
+            for chat_id, last_at, first_at, has_handoff in rows
+            # Quiet for the whole window, OR waiting longer than the
+            # ceiling, OR carrying something that needs a human now.
+            if last_at <= now - window or first_at <= now - _MAX_DEBOUNCE_WAIT or bool(has_handoff)
+        ]
         if not due:
             return 0
         semaphore = asyncio.Semaphore(8)  # SPEC §9.3 MAX_CONCURRENT_AI_REQUESTS
@@ -481,6 +531,11 @@ class AiPipeline:
                 for message in text_messages:
                     message.state = MsgState.IGNORED
                     message.error_code = "spam"
+                # Silence is the right answer to a flood, but invisible
+                # silence is not: without this the chat never appears in
+                # «требует внимания» and a customer who repeated himself
+                # because the bot was slow is simply dropped.
+                await set_attention(db, chat, AttentionReason.HANDOFF)
                 await db.commit()
                 return _ClaimResult(media_ack=media_ack)
 
@@ -492,7 +547,8 @@ class AiPipeline:
                 message.correlation_id = correlation_id
                 message.next_attempt_at = lease
 
-            question = "\n".join(message_text(m) for m in text_messages if message_text(m))
+            parts = merged_parts(text_messages)
+            question = "\n".join(parts)
             language = detect_language(question)
             history = await self._history(db, chat_id, before_id=text_messages[0].id)
             memory_row = await db.get(ChatMemory, chat_id)
@@ -520,6 +576,9 @@ class AiPipeline:
                     memory=memory,
                     summary=summary,
                     merged_count=len(text_messages),
+                    # The individual messages, so the FAQ can be tried per
+                    # message when the merged text matches no pattern.
+                    parts=parts,
                     attempt=retry_count,
                 ),
             )
@@ -533,17 +592,24 @@ class AiPipeline:
         batch: list[Message],
         threshold: int,
     ) -> bool:
-        """N identical customer messages in a row (SPEC §6.7.5).
+        """N identical customer ATTEMPTS in a row (SPEC §6.7.5).
 
         Compared on `message_text`, so five identical voice notes count as
         spam too — their words live in `transcript`, not `body`.
+
+        One debounce batch is ONE attempt, however many repeats it holds.
+        The rule exists so that repetition cannot burn the budget, and a
+        merged batch costs exactly one call no matter what — while
+        counting its lines would mean that a customer who taps «Алло»
+        five times at a bot that is deliberately pausing gets silence
+        instead of the answer he is waiting for.
         """
         bodies = {normalize_query(message_text(m)) for m in batch}
         if len(bodies) != 1:
             return False
-        if len(batch) >= threshold:
+        needed = threshold - 1
+        if needed <= 0:
             return True
-        needed = threshold - len(batch)
         previous = (
             (
                 await db.execute(

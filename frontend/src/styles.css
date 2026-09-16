@@ -2077,3 +2077,21 @@ textarea {
 .plaque .tight-list li + li {
   margin-top: 4px;
 }
+
+/* Задержка перед ответом: ряд пресетов + своё значение, отдельным блоком
+   над сеткой числовых полей — шесть кнопок не помещаются в ячейку 220px. */
+.debounce-field {
+  margin-bottom: 16px;
+}
+.debounce-field .filter-chips {
+  margin: 6px 0 2px;
+}
+.debounce-field input[type="number"] {
+  max-width: 140px;
+}
+.debounce-field .hint-row {
+  padding-bottom: 0;
+  border-bottom: none;
+  margin-bottom: 0;
+  font-weight: 400;
+}

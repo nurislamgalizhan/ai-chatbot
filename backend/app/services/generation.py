@@ -343,6 +343,10 @@ class GenerationInput:
     memory: dict[str, Any] | None = None
     summary: str | None = None
     merged_count: int = 1
+    #: The individual messages of a debounce batch. Merging two FAQ
+    #: questions produces a word set that matches no pattern, so a free
+    #: answer silently became a paid one as soon as the window grew.
+    parts: list[str] = field(default_factory=list)
     # Retry attempt number. Baked into the reservation sub-correlation:
     # a NEW attempt takes a NEW reservation (the previous one is already
     # released, and a released reservation is terminal by design), while
@@ -376,6 +380,37 @@ class GenerationOutcome:
         too, and the dialog's running cost must include it.
         """
         return self.kind == "model" or self.cost_usd > 0
+
+
+#: More than this many questions in one batch is a conversation, not a
+#: pair of FAQ questions: answering it with a wall of canned text would
+#: read worse than one composed reply.
+_MAX_FAQ_PARTS = 3
+#: Below two parts there is nothing to split: the single question was
+#: already tried against the FAQ by the caller.
+_MIN_FAQ_PARTS = 2
+
+
+async def _faq_for_every_part(db: AsyncSession, inp: GenerationInput) -> str | None:
+    """Answer a debounce batch from the FAQ when EVERY message in it is
+    an FAQ question.
+
+    «Какой у вас адрес?» and «Во сколько вы работаете?» are both free on
+    their own; merged into one question they match no pattern and used
+    to buy a model call. All-or-nothing on purpose: answering only the
+    part that matched would leave the other question unanswered.
+    """
+    parts = [part for part in inp.parts if part.strip()]
+    if not _MIN_FAQ_PARTS <= len(parts) <= _MAX_FAQ_PARTS:
+        return None
+    answers: list[str] = []
+    for part in parts:
+        hit = await match_faq(db, part, inp.language, chat_id=inp.chat_id)
+        if hit is None:
+            return None
+        if hit.answer not in answers:
+            answers.append(hit.answer)
+    return "\n\n".join(answers)
 
 
 async def _record_ai_call(
@@ -566,10 +601,11 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
             return GenerationOutcome(kind="not_configured", error_code="no_active_instruction")
 
         faq = await match_faq(db, inp.question, inp.language, chat_id=inp.chat_id)
+        faq_text = faq.answer if faq is not None else await _faq_for_every_part(db, inp)
         cache_enabled = bool(await get_setting(db, app_settings.SEMANTIC_CACHE_ENABLED))
         kb_version = await semantic_cache.get_kb_version(db)
         cached_answer: str | None = None
-        if cache_enabled and faq is None and inp.merged_count == 1:
+        if cache_enabled and faq_text is None and inp.merged_count == 1:
             cached_answer = await semantic_cache.lookup(
                 db, inp.question, inp.language, None, kb_version
             )
@@ -581,10 +617,8 @@ async def generate_reply(deps: GenerationDeps, inp: GenerationInput) -> Generati
         allowed_domains = list(await get_setting(db, app_settings.ALLOWED_LINK_DOMAINS))
         await db.commit()  # persists FAQ miss records and cache hit counts
 
-    if faq is not None:
-        return GenerationOutcome(
-            kind="faq", text=faq.answer, instruction_version=instruction.version
-        )
+    if faq_text is not None:
+        return GenerationOutcome(kind="faq", text=faq_text, instruction_version=instruction.version)
     if cached_answer is not None:
         return GenerationOutcome(
             kind="cache",

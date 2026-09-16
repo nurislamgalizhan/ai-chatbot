@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { ApiError } from "../api/client";
+import Icon from "../components/icons";
 import {
   getLimits,
   type LimitsSettings,
@@ -19,6 +20,73 @@ const UNIT_LABELS: Record<string, string> = {
 function kzt(usd: string | number, rate: string | null): string {
   if (!rate) return "—";
   return `${(Number(usd) * Number(rate)).toFixed(2)} ₸`;
+}
+
+/* Лестница пресетов как у прошлого вендора (docs/ui-reference/img/
+ * settings-responses.png): 0/10/20/30/60 плюс свой вариант. Верхняя
+ * граница совпадает с backend/app/schemas/limits.py. */
+const DEBOUNCE_PRESETS = [0, 10, 20, 30, 60];
+const DEBOUNCE_MAX = 60;
+
+function DebounceField({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  // «Свой вариант» остаётся открытым, пока владелец печатает, даже если
+  // набранное число совпало с пресетом.
+  const [custom, setCustom] = useState(() => !DEBOUNCE_PRESETS.includes(value));
+  return (
+    <div className="limit-field debounce-field">
+      <span>Задержка перед ответом</span>
+      <div className="filter-chips">
+        {DEBOUNCE_PRESETS.map((seconds) => (
+          <button
+            key={seconds}
+            type="button"
+            className={!custom && value === seconds ? "chip-btn active" : "chip-btn"}
+            onClick={() => {
+              setCustom(false);
+              onChange(seconds);
+            }}
+          >
+            {seconds === 0 ? "Без задержки" : `${seconds} сек`}
+          </button>
+        ))}
+        <button
+          type="button"
+          className={custom ? "chip-btn active" : "chip-btn"}
+          onClick={() => setCustom(true)}
+        >
+          Свой вариант
+        </button>
+      </div>
+      {custom && (
+        <input
+          type="number"
+          min={0}
+          max={DEBOUNCE_MAX}
+          aria-label="Задержка перед ответом, секунд"
+          value={Number.isFinite(value) ? value : ""}
+          onChange={(e) => onChange(Number(e.target.value))}
+        />
+      )}
+      <div className="hint-row">
+        <Icon name="info" size={15} />
+        <span>
+          Клиент часто пишет одну мысль несколькими сообщениями подряд. Бот ждёт
+          указанное время после последнего из них и отвечает на все разом: это
+          и естественнее для клиента, и дешевле — склейка оплачивается как один
+          вопрос. «Без задержки» — ответ на первое же сообщение. Отсчёт
+          начинается заново с каждым новым сообщением, но дольше двух минут бот
+          не ждёт никогда. Файл, геолокация и просьба позвать менеджера уходят
+          человеку сразу, не дожидаясь паузы.
+        </span>
+      </div>
+    </div>
+  );
 }
 
 function NumberField({
@@ -281,6 +349,10 @@ export default function LimitsPage() {
 
       <section className="card">
         <h2>Контекст и поведение</h2>
+        <DebounceField
+          value={form.debounce_seconds}
+          onChange={(v) => update({ debounce_seconds: v })}
+        />
         <div className="limits-grid">
           <NumberField
             label="Макс. входных токенов"
@@ -291,12 +363,6 @@ export default function LimitsPage() {
             label="Макс. токенов ответа"
             value={form.max_output_tokens}
             onChange={(v) => update({ max_output_tokens: v })}
-          />
-          <NumberField
-            label="Дебаунс, сек"
-            hint="склейка подряд идущих сообщений"
-            value={form.debounce_seconds}
-            onChange={(v) => update({ debounce_seconds: v })}
           />
           <NumberField
             label="Отсечка возраста, мин"

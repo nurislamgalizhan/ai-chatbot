@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class LimitsSettings(BaseModel):
@@ -23,7 +23,8 @@ class LimitsSettings(BaseModel):
     max_ai_cost_per_user_per_day_kzt: float = Field(ge=0, le=1_000_000)
     daily_ai_budget_kzt: float = Field(ge=0, le=10_000_000)
     monthly_ai_budget_kzt: float = Field(ge=0, le=100_000_000)
-    debounce_seconds: int = Field(ge=0, le=30)
+    # 0 = отвечать на первое же сообщение; верх — как у прошлого вендора.
+    debounce_seconds: int = Field(ge=0, le=60)
     max_messages_per_user_per_minute: int = Field(ge=1, le=60)
     max_messages_per_user_per_hour: int = Field(ge=1, le=1_000)
     spam_repeat_threshold: int = Field(ge=2, le=20)
@@ -63,6 +64,25 @@ class LimitsSettings(BaseModel):
     link_preview_enabled: bool
     quote_customer_message: bool
     provider_queue_alert_depth: int = Field(ge=1, le=10_000)
+
+    @model_validator(mode="after")
+    def _debounce_fits_the_stale_window(self) -> LimitsSettings:
+        """Two settings, each valid alone, can contradict each other.
+
+        Messages older than `ai_max_message_age_minutes` are never
+        answered. The debounce spends part of that window before the bot
+        even starts, so with a 5-minute cutoff a 60-second pause would
+        burn a fifth of it — and a customer writing every 50 seconds
+        could have his message expire while the bot politely waits.
+        """
+        budget = self.ai_max_message_age_minutes * 60
+        if self.debounce_seconds * 10 > budget:
+            msg = (
+                "Задержка перед ответом слишком велика для текущей отсечки возраста "
+                f"({self.ai_max_message_age_minutes} мин): максимум {budget // 10} сек"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class PriceItem(BaseModel):
